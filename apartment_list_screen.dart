@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'dart:io';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:realtor_app/data/app_data.dart';
 import 'package:intl/intl.dart';
@@ -15,8 +16,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'invoice_generator_screen.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:realtor_app/contract_form_screen.dart';
-
-
+import '../utils/custom_snackbar.dart'; // <-- IMPORT THE NEW SNACKBAR HELPER
 
 
 class ApartmentListScreen extends StatefulWidget {
@@ -30,6 +30,16 @@ class _ApartmentListScreenState extends State<ApartmentListScreen> {
   late Stream<List<Apartment>> _apartmentsStream;
   late FirestoreService _firestoreService;
 
+  // --- STATE VARIABLES FOR FILTERING & PINNING ---
+  final TextEditingController _searchController = TextEditingController();
+  DateTime? _filterStartDate;
+  DateTime? _filterEndDate;
+  List<Apartment> _allApartments = [];
+  List<Apartment> _filteredApartments = [];
+  bool _isFilterActive = false; // This now also controls "selection mode"
+  bool _isFilterVisible = false;
+  Set<String> _selectedApartmentIds = {}; // Tracks selected apartments for pinning
+
   @override
   void initState() {
     super.initState();
@@ -38,89 +48,525 @@ class _ApartmentListScreenState extends State<ApartmentListScreen> {
   }
 
   @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  /// --- Helper to show date picker ---
+  Future<void> _selectDate(BuildContext context, bool isStartDate) async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    const accentColor = Color(0xFF004aad);
+
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: (isStartDate ? _filterStartDate : _filterEndDate ?? _filterStartDate) ?? today,
+      firstDate: isStartDate ? today : (_filterStartDate ?? today),
+      lastDate: now.add(const Duration(days: 730)),
+      builder: (context, child) {
+        return Transform.scale(
+          scale: 1.2,
+          child: Theme(
+            data: Theme.of(context).copyWith(
+              colorScheme: const ColorScheme.light(
+                primary: accentColor, // header background color
+                onPrimary: Colors.white, // header text color
+                onSurface: Colors.black, // body text color
+              ),
+              textButtonTheme: TextButtonThemeData(
+                style: TextButton.styleFrom(
+                  foregroundColor: accentColor, // button text color
+                ),
+              ),
+            ),
+            child: child!,
+          ),
+        );
+      },
+    );
+    if (picked != null) {
+      setState(() {
+        if (isStartDate) {
+          _filterStartDate = picked;
+          // Ensure end date is not before start date
+          if (_filterEndDate != null && _filterEndDate!.isBefore(_filterStartDate!)) {
+            _filterEndDate = null;
+          }
+        } else {
+          _filterEndDate = picked;
+        }
+      });
+    }
+  }
+
+  /// --- Availability check logic ---
+  bool _isApartmentAvailable(Apartment apartment, DateTime startDate, DateTime endDate) {
+    final bookingInfo = apartment.bookingInfo;
+    final bookedDatesSet = apartment.bookedDates
+        .map((d) => DateTime(d.year, d.month, d.day))
+        .toSet();
+
+    bool isCheckInDay(DateTime day) {
+      return bookingInfo.any((b) =>
+          DateTime(b.checkIn.year, b.checkIn.month, b.checkIn.day).isAtSameMomentAs(day));
+    }
+    bool isCheckOutDay(DateTime day) {
+      return bookingInfo.any((b) =>
+          DateTime(b.checkOut.year, b.checkOut.month, b.checkOut.day).isAtSameMomentAs(day));
+    }
+
+    int daysInRange = endDate.difference(startDate).inDays;
+    if (daysInRange <= 0) return false;
+
+    for (int i = 0; i < daysInRange; i++) {
+      final dayToCheck = startDate.add(Duration(days: i));
+
+      if (bookedDatesSet.contains(dayToCheck)) {
+        if (!isCheckOutDay(dayToCheck) || isCheckInDay(dayToCheck)) {
+          return false; // Conflict found
+        }
+      }
+    }
+
+    return true; // No conflicts found in the range
+  }
+
+
+  /// --- The core filtering logic ---
+  void _applyFilters() {
+    setState(() {
+      _isFilterActive = true;
+
+      // When entering selection mode, pre-select already pinned apartments
+      _selectedApartmentIds = _allApartments
+          .where((ap) => ap.isPinned)
+          .map((ap) => ap.id)
+          .toSet();
+
+      List<Apartment> results = List.from(_allApartments);
+
+      // 1. Filter by date range
+      if (_filterStartDate != null && _filterEndDate != null) {
+        if (_filterStartDate!.isAfter(_filterEndDate!)) {
+          _filteredApartments = []; // Invalid range
+          return;
+        }
+        results = results.where((apartment) {
+          return _isApartmentAvailable(apartment, _filterStartDate!, _filterEndDate!);
+        }).toList();
+      }
+
+      // 2. Filter by search text
+      final query = _searchController.text.trim().toLowerCase();
+      if (query.isNotEmpty) {
+        results = results.where((apartment) {
+          return apartment.geAddress.toLowerCase().contains(query) ||
+              apartment.ownerName.toLowerCase().contains(query);
+        }).toList();
+      }
+
+      _filteredApartments = results;
+    });
+  }
+
+  /// --- Logic to clear all active filters ---
+  void _clearFilters() {
+    setState(() {
+      _isFilterActive = false;
+      _filterStartDate = null;
+      _filterEndDate = null;
+      _searchController.clear();
+      _filteredApartments = [];
+      _selectedApartmentIds.clear();
+    });
+  }
+
+  /// --- Logic to save pinned apartments ---
+  Future<void> _savePins() async {
+    final batch = _firestoreService.db.batch();
+    final now = Timestamp.now();
+    bool hasChanges = false;
+
+    // Use the main list of all apartments to check for changes
+    for (final apartment in _allApartments) {
+      final bool isCurrentlySelected = _selectedApartmentIds.contains(apartment.id);
+      final bool wasOriginallyPinned = apartment.isPinned;
+
+      if (isCurrentlySelected && !wasOriginallyPinned) {
+        // PIN IT: Apartment was not pinned, but is now selected.
+        final docRef = _firestoreService.db.collection('apartments').doc(apartment.id);
+        batch.update(docRef, {'isPinned': true, 'pinnedTimestamp': now});
+        hasChanges = true;
+      } else if (!isCurrentlySelected && wasOriginallyPinned) {
+        // UNPIN IT: Apartment was pinned, but is now un-selected.
+        final docRef = _firestoreService.db.collection('apartments').doc(apartment.id);
+        batch.update(docRef, {'isPinned': false, 'pinnedTimestamp': null});
+        hasChanges = true;
+      }
+    }
+
+    if (hasChanges) {
+      try {
+        await batch.commit();
+        if (mounted) {
+          CustomSnackBar.show(
+            context: context,
+            message: 'ცვლილებები შენახულია',
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          CustomSnackBar.show(
+            context: context,
+            message: 'შენახვა ვერ მოხერხდა: $e',
+            isError: true,
+          );
+        }
+      }
+    }
+
+    // Exit selection/filter mode after saving
+    _clearFilters();
+  }
+
+
+  /// --- A helper widget for the date picker fields ---
+  Widget _buildDatePickerField({
+    required BuildContext context,
+    required String label,
+    required DateTime? date,
+    required VoidCallback onTap,
+  }) {
+    final DateFormat formatter = DateFormat('dd/MMM/yyyy', 'ka_GE');
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.grey.shade400),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Expanded(
+              child: Text(
+                date == null ? label : formatter.format(date),
+                style: TextStyle(
+                  fontSize: 14,
+                  color: date == null ? Colors.grey[700] : Colors.black,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+            const Icon(Icons.calendar_today, size: 20, color: Color(0xFF004aad)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      appBar: AppBar(
-        elevation: 0,
-        title: const Text(
-          'ბინების სია',
-          style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        backgroundColor: const Color(0xFF004aad),
-        centerTitle: true,
-        iconTheme: const IconThemeData(color: Colors.white),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.add),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const AddApartmentScreen(),
+      body: Stack(
+        children: [
+          CustomScrollView(
+            slivers: [
+              SliverAppBar(
+                elevation: 0,
+                title: const Text(
+                  'ბინების სია',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
-              ).then((_) {
-                // Refresh the stream when returning from add screen
-                setState(() {
-                  _apartmentsStream = _firestoreService.getAllApartments();
-                });
-              });
-            },
-          ),
-        ],
-      ),
-      body: StreamBuilder<List<Apartment>>(
-        stream: _apartmentsStream,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(child: Text('შეცდომა: ${snapshot.error}'));
-          }
-          if (!snapshot.hasData || snapshot.data!.isEmpty) {
-            return const Center(child: Text('ბინა ვერ მოიძებნა.'));
-          }
+                backgroundColor: const Color(0xFF004aad),
+                centerTitle: true,
+                iconTheme: const IconThemeData(color: Colors.white),
+                actions: [
+                  IconButton(
+                    icon: const Icon(Icons.add),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const AddApartmentScreen(),
+                        ),
+                      ).then((_) {
+                        setState(() {
+                          _apartmentsStream = _firestoreService.getAllApartments();
+                        });
+                      });
+                    },
+                  ),
+                ],
+                pinned: true,
+                floating: true,
+              ),
+              SliverToBoxAdapter(
+                child: Container(
+                  color: Colors.white,
+                  padding: const EdgeInsets.fromLTRB(16.0, 16.0, 16.0, 16.0),
+                  child: Column(
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          setState(() {
+                            _isFilterVisible = !_isFilterVisible;
+                          });
+                        },
+                        icon: Icon(
+                          _isFilterVisible ? Icons.close : Icons.filter_list,
+                          color: Colors.white,
+                        ),
+                        label: Text(
+                          _isFilterVisible ? 'ფილტრის დახურვა' : 'გაფილტრვა',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _isFilterVisible ? Colors.red : const Color(0xFF004aad),
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size(double.infinity, 50),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          elevation: 2,
+                        ),
+                      ),
+                      AnimatedSize(
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.easeInOut,
+                        child: _isFilterVisible
+                            ? Padding(
+                          padding: const EdgeInsets.only(top: 12.0),
+                          child: Column(
+                            children: [
+                              Column(
+                                children: [
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: _buildDatePickerField(
+                                          context: context,
+                                          label: 'შესვლა',
+                                          date: _filterStartDate,
+                                          onTap: () => _selectDate(context, true),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: _buildDatePickerField(
+                                          context: context,
+                                          label: 'გასვლა',
+                                          date: _filterEndDate,
+                                          onTap: () => _selectDate(context, false),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  SizedBox(
+                                    height: 48,
+                                    child: TextField(
+                                      controller: _searchController,
+                                      decoration: InputDecoration(
+                                        hintText: 'მისამართი, მეპატრონე...',
+                                        prefixIcon: const Icon(Icons.search, size: 22, color: Color(0xFF004aad)),
+                                        border: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(8),
+                                          borderSide: BorderSide(color: Colors.grey.shade400),
+                                        ),
+                                        enabledBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(8),
+                                          borderSide: BorderSide(color: Colors.grey.shade400),
+                                        ),
+                                        focusedBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(8),
+                                          borderSide: const BorderSide(color: Color(0xFF004aad), width: 2),
+                                        ),
+                                        contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton(
+                                  onPressed: _applyFilters,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF004aad),
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(vertical: 14),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                  ),
+                                  child: const Text(
+                                    'ძიება',
+                                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                              ),
+                              if (_isFilterActive) ...[
+                                const SizedBox(height: 8),
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: TextButton.icon(
+                                    onPressed: _clearFilters,
+                                    icon: const Icon(Icons.clear, color: Colors.red),
+                                    label: const Text(
+                                      'ფილტრის გასუფთავება',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.red,
+                                      ),
+                                    ),
+                                    style: TextButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(vertical: 12),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                        side: BorderSide(color: Colors.red.withOpacity(0.5)),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        )
+                            : const SizedBox.shrink(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              StreamBuilder<List<Apartment>>(
+                stream: _apartmentsStream,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const SliverFillRemaining(
+                      child: Center(child: CircularProgressIndicator()),
+                    );
+                  }
+                  if (snapshot.hasError) {
+                    return SliverFillRemaining(
+                      child: Center(child: Text('შეცდომა: ${snapshot.error}')),
+                    );
+                  }
+                  if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                    return const SliverFillRemaining(
+                      child: Center(child: Text('ბინა ვერ მოიძებნა.')),
+                    );
+                  }
 
-          final apartments = snapshot.data!;
-          return ListView.builder(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0),
-            itemCount: apartments.length,
-            itemBuilder: (context, index) {
-              final apartment = apartments[index];
-              return Padding(
-                padding: EdgeInsets.only(
-                  top: index == 0 ? 12.0 : 0.0,  // Only add top padding for the first card
-                  bottom: 16.0,
+                  _allApartments = snapshot.data!;
+                  // --- SORTING LOGIC ---
+                  _allApartments.sort((a, b) {
+                    if (a.isPinned && !b.isPinned) return -1;
+                    if (!a.isPinned && b.isPinned) return 1;
+                    if (a.isPinned && b.isPinned) {
+                      // Sort by timestamp descending (newer first)
+                      final aTimestamp = a.pinnedTimestamp?.millisecondsSinceEpoch ?? 0;
+                      final bTimestamp = b.pinnedTimestamp?.millisecondsSinceEpoch ?? 0;
+                      return bTimestamp.compareTo(aTimestamp);
+                    }
+                    return 0; // Maintain original order for non-pinned items
+                  });
+
+                  final apartmentsToShow = _isFilterActive ? _filteredApartments : _allApartments;
+
+                  if (apartmentsToShow.isEmpty) {
+                    return const SliverFillRemaining(
+                      child: Center(child: Text('მითითებული პარამეტრებით ბინა ვერ მოიძებნა.')),
+                    );
+                  }
+
+                  return SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                          (context, index) {
+                        final apartment = apartmentsToShow[index];
+                        return Padding(
+                          padding: const EdgeInsets.fromLTRB(16.0, 0, 16.0, 16.0),
+                          child: ApartmentCard(
+                            key: ValueKey(apartment.id),
+                            apartment: apartment,
+                            ownerName: apartment.ownerName,
+                            isSelectionMode: _isFilterActive,
+                            isSelected: _selectedApartmentIds.contains(apartment.id),
+                            onSelect: (apartmentId) {
+                              setState(() {
+                                if (_selectedApartmentIds.contains(apartmentId)) {
+                                  _selectedApartmentIds.remove(apartmentId);
+                                } else {
+                                  _selectedApartmentIds.add(apartmentId);
+                                }
+                              });
+                            },
+                          ),
+                        );
+                      },
+                      childCount: apartmentsToShow.length,
+                    ),
+                  );
+                },
+              ),
+              // Add some padding at the bottom to avoid the save button overlapping content
+              const SliverToBoxAdapter(child: SizedBox(height: 80)),
+            ],
+          ),
+          // --- "SAVE" BUTTON FOR PINNING ---
+          if (_isFilterActive)
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: Container(
+                color: Colors.white,
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.push_pin_outlined, color: Colors.white),
+                  label: const Text('შენახვა', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  onPressed: _savePins,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF004aad),
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(double.infinity, 50),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    elevation: 4,
+                  ),
                 ),
-                child: ApartmentCard(
-                  key: ValueKey(apartment.id),
-                  apartment: apartment,
-                  ownerName: apartment.ownerName,
-                ),
-              );
-            },
-          );
-        },
+              ),
+            ),
+        ],
       ),
     );
   }
 }
 
-// NO CHANGES BELOW THIS LINE
-// The ApartmentCard widget and its state remain the same.
 
 class ApartmentCard extends StatefulWidget {
   final Apartment apartment;
   final String ownerName;
+  final bool isSelectionMode;
+  final bool isSelected;
+  final ValueChanged<String> onSelect;
 
   const ApartmentCard({
     super.key,
     required this.apartment,
     required this.ownerName,
+    required this.isSelectionMode,
+    required this.isSelected,
+    required this.onSelect,
   });
 
   @override
@@ -211,12 +657,17 @@ class _ApartmentCardState extends State<ApartmentCard> with AutomaticKeepAliveCl
   List<ImageProvider> _imageProviders = [];
   bool _imagesPrecached = false;
 
+  /// MODIFICATION: Added state to track the current calendar month for click handling.
+  late DateTime _currentCalendarMonth;
+
   @override
   void initState() {
     super.initState();
     _georgianLocaleFuture ??= initializeDateFormatting('ka_GE');
     _firestoreService = Provider.of<FirestoreService>(context, listen: false);
     _pageController = PageController();
+
+    _currentCalendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
 
     _imageProviders = widget.apartment.imageUrls
         .map((url) => NetworkImage(url))
@@ -261,12 +712,105 @@ class _ApartmentCardState extends State<ApartmentCard> with AutomaticKeepAliveCl
     super.dispose();
   }
 
+// --- UNPINNING LOGIC ---
+  void _showUnpinConfirmationDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        const accentColor = Color(0xFF004aad);
+        return AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+          title: const Text(
+            'გსურთ მიბმევის გაუქმება?',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: accentColor,
+            ),
+          ),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          actions: [
+            Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 44,
+                    child: TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        backgroundColor: Colors.red,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      child: const Text('არა'),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: SizedBox(
+                    height: 44,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        _unpinApartment();
+                        Navigator.of(context).pop();
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: accentColor,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      child: const Text('კი'),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _unpinApartment() async {
+    try {
+      final updatedApartment = widget.apartment.copyWith(
+        isPinned: false,
+        pinnedTimestamp: () => null, // Use the ValueGetter to set null
+      );
+      await _firestoreService.updateApartment(updatedApartment);
+      if (mounted) {
+        CustomSnackBar.show(
+          context: context,
+          message: 'მიბმევა გაუქმდა',
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        CustomSnackBar.show(
+          context: context,
+          message: 'მიბმევის გაუქმება ვერ მოხერხდა: $e',
+          isError: true,
+        );
+      }
+    }
+  }
+
 // Replace the _bookApartment method in _ApartmentCardState:
   void _bookApartment() async {
     if (_startDate == null || _endDate == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('გთხოვთ მონიშნოთ დღეები დასაჯავშნათ')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'გთხოვთ მონიშნოთ დღეები დასაჯავშნათ',
+          isError: true,
         );
       }
       return;
@@ -299,10 +843,11 @@ class _ApartmentCardState extends State<ApartmentCard> with AutomaticKeepAliveCl
 
   void _editBooking() async {
     if (_startDate == null || _endDate == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please select a booking to edit.'),
-        ),
+      // --- MODIFIED ---
+      CustomSnackBar.show(
+        context: context,
+        message: 'გთხოვთ აირჩიოთ ჯავშანი დასარედაქტირებლად',
+        isError: true,
       );
       return;
     }
@@ -320,8 +865,11 @@ class _ApartmentCardState extends State<ApartmentCard> with AutomaticKeepAliveCl
     }
 
     if (targetBooking == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not find the selected booking details.')),
+      // --- MODIFIED ---
+      CustomSnackBar.show(
+        context: context,
+        message: 'ვერ მოიძებნა მონიშნული ჯავშნის დეტალები',
+        isError: true,
       );
       return;
     }
@@ -350,8 +898,11 @@ class _ApartmentCardState extends State<ApartmentCard> with AutomaticKeepAliveCl
         ),
       );
     } else if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to load booking details for editing.')),
+      // --- MODIFIED ---
+      CustomSnackBar.show(
+        context: context,
+        message: 'ვერ ჩაიტვირთა ჯავშანი დასარედაქტირებლად',
+        isError: true,
       );
     }
   }
@@ -431,22 +982,22 @@ class _ApartmentCardState extends State<ApartmentCard> with AutomaticKeepAliveCl
 
       if (mounted) {
         final georgianDateFormat = DateFormat('dd/MMM/yyyy', 'ka_GE');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-                'ჯავშანი გაუქმდა: ${georgianDateFormat.format(booking.checkIn)} - ${georgianDateFormat.format(booking.checkOut)}'
-            ),
-          ),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message:
+          'ჯავშანი გაუქმდა: ${georgianDateFormat.format(booking.checkIn)} - ${georgianDateFormat.format(booking.checkOut)}',
         );
       }
     } catch (e) {
       // Revert on error
       if (mounted) {
         bookedDatesNotifier.value = originalBookedDates;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('ვერ მოხერხდა ჯავშნის გაუქმება: $e'),
-          ),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'ვერ მოხერხდა ჯავშნის გაუქმება: $e',
+          isError: true,
         );
       }
     } finally {
@@ -892,29 +1443,28 @@ class _ApartmentCardState extends State<ApartmentCard> with AutomaticKeepAliveCl
                                 if (mounted) setState(() {});
 
                                 Navigator.of(context).pop();
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(priceType == 'Daily'
-                                        ? 'დღიური ფასი წარმატებით განახლდა!'
-                                        : 'ყოველთვიური ფასი წარმატებით განახლდა!'),
-                                    backgroundColor: Colors.green,
-                                  ),
+                                // --- MODIFIED ---
+                                CustomSnackBar.show(
+                                  context: context,
+                                  message: priceType == 'Daily'
+                                      ? 'დღიური ფასი წარმატებით განახლდა!'
+                                      : 'ყოველთვიური ფასი წარმატებით განახლდა!',
                                 );
                               } catch (e) {
                                 Navigator.of(context).pop();
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('ფასის განახლება ვერ მოხერხდა: ${e.toString()}'),
-                                    backgroundColor: Colors.red,
-                                  ),
+                                // --- MODIFIED ---
+                                CustomSnackBar.show(
+                                  context: context,
+                                  message: 'ფასის განახლება ვერ მოხერხდა: ${e.toString()}',
+                                  isError: true,
                                 );
                               }
                             } else {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('გთხოვთ შეიყვანოთ სწორი ფასი'),
-                                  backgroundColor: Colors.red,
-                                ),
+                              // --- MODIFIED ---
+                              CustomSnackBar.show(
+                                context: context,
+                                message: 'გთხოვთ შეიყვანოთ სწორი ფასი',
+                                isError: true,
                               );
                             }
                           },
@@ -1199,8 +1749,11 @@ Price: $highlightedPrice
         debugPrint('No images available, falling back to text sharing');
         await Share.share(message);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('No images available, shared text only')),
+          // --- MODIFIED ---
+          CustomSnackBar.show(
+            context: context,
+            message: 'სურათები ვერ მოიძებნა, მხოლოდ ტექსტი',
+            isError: true,
           );
         }
         return;
@@ -1244,8 +1797,10 @@ Price: $highlightedPrice
           subject: 'Apartment Details',
         );
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Shared ${files.length} images and details')),
+          // --- MODIFIED ---
+          CustomSnackBar.show(
+            context: context,
+            message: 'გაზიარდა ${files.length} სურათები და დეტალები',
           );
         }
       } else {
@@ -1253,16 +1808,22 @@ Price: $highlightedPrice
         debugPrint('No images were successfully prepared, falling back to text sharing.');
         await Share.share(message);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not load images, shared text only.')),
+          // --- MODIFIED ---
+          CustomSnackBar.show(
+            context: context,
+            message: 'სურათები ვერ ჩაიტვირთა, მხოლოდ ტექსტი',
+            isError: true,
           );
         }
       }
     } catch (e) {
       debugPrint('An error occurred during sharing: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to share apartment details')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'ვერ მოხერხდა ბინის დეტალების გაზიარება',
+          isError: true,
         );
       }
     }
@@ -1307,13 +1868,23 @@ Price: $highlightedPrice
     return LayoutBuilder(
       builder: (context, constraints) {
         return SizedBox(
-          height: 425,
+          height: 445,
           child: CalendarCarousel(
             locale: 'ka_GE',
             weekdayTextStyle: const TextStyle(
                 color: Color(0xFF004aad), fontWeight: FontWeight.bold),
             customGridViewPhysics: const NeverScrollableScrollPhysics(),
+            /// MODIFICATION: Keeps track of the visible month.
+            onCalendarChanged: (DateTime month) {
+              setState(() {
+                _currentCalendarMonth = month;
+              });
+            },
             onDayPressed: (DateTime date, List events) {
+              /// MODIFICATION: Prevents clicks on days outside the current month.
+              if (date.month != _currentCalendarMonth.month) {
+                return;
+              }
               setState(() {
                 final normalizedDay = DateTime(date.year, date.month, date.day);
 
@@ -1528,7 +2099,7 @@ Price: $highlightedPrice
             },
             weekendTextStyle: const TextStyle(color: Colors.red),
             daysHaveCircularBorder: true,
-            todayButtonColor: const Color(0xFFE0E7FF),
+            todayButtonColor: const Color(0xFF004aad).withOpacity(0.2),
             todayBorderColor: const Color(0xFF004aad),
             todayTextStyle: const TextStyle(
               color: Color(0xFF004aad),
@@ -1574,6 +2145,10 @@ Price: $highlightedPrice
                 bool isNextMonthDay,
                 bool isThisMonthDay,
                 DateTime day,) {
+              /// MODIFICATION: This check ensures that days from the previous and next months are not rendered.
+              if (!isThisMonthDay) {
+                return const SizedBox.shrink();
+              }
               final normalizedDay = DateTime(day.year, day.month, day.day);
               bool isBooked = bookedDatesSet.contains(normalizedDay);
               bool isStart = _startDate != null &&
@@ -2014,6 +2589,56 @@ Price: $highlightedPrice
     );
   }
 
+  /// MODIFIED: This widget is now larger in selection mode.
+  Widget _buildPinOrSelectWidget() {
+    const accentColor = Color(0xFF004aad);
+    if (widget.isSelectionMode) {
+      // --- SELECTION MODE WIDGET ---
+      return GestureDetector(
+        onTap: () => widget.onSelect(widget.apartment.id),
+        child: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: widget.isSelected ? accentColor : Colors.grey.shade400,
+              width: 2,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.2),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
+              )
+            ],
+          ),
+          child: widget.isSelected
+              ? const Icon(Icons.check, color: accentColor, size: 30)
+              : null,
+        ),
+      );
+    } else if (widget.apartment.isPinned) {
+      // --- NORMAL MODE (PINNED) WIDGET ---
+      return IconButton(
+        padding: EdgeInsets.zero,
+        icon: const Icon(
+          Icons.push_pin,
+          color: accentColor,
+          size: 32,
+        ),
+        onPressed: _showUnpinConfirmationDialog,
+      );
+    } else {
+      // --- NORMAL MODE (NOT PINNED) ---
+      return const SizedBox.shrink();
+    }
+  }
+
+
+  /// MODIFIED: The build method has been restructured to fix the position
+  /// of the pin/select widget during card expansion.
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -2022,393 +2647,426 @@ Price: $highlightedPrice
 
     return Container(
       margin: const EdgeInsets.only(bottom: 16.0),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16.0),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.35),
-            spreadRadius: 3,
-            blurRadius: 20,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
       child: Card(
         margin: EdgeInsets.zero,
         elevation: 0,
+        clipBehavior: Clip.antiAlias,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16.0),
+          side: const BorderSide(color: Color(0xFF004aad), width: 2.0),
         ),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(16.0),
-          onTap: () {
-            setState(() {
-              _isExpanded = !_isExpanded;
-            });
-          },
-          onLongPress: () async {
-            final result = await Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) =>
-                    ApartmentDetailsScreen(apartment: widget.apartment),
-              ),
-            );
+        child: ValueListenableBuilder<Set<DateTime>>(
+          valueListenable: bookedDatesNotifier,
+          builder: (context, bookedDatesSet, child) {
+            final nearestAvailabilityStatus = _getNearestAvailabilityStatus(bookedDatesSet);
+            final allAvailabilityPeriods = _getAvailabilityPeriods(bookedDatesSet, widget.apartment.bookingInfo);
+            final bool isUnbooking = _startDate != null && _endDate != null && _isEntireRangeBooked(bookedDatesSet);
 
-            if (mounted) {
-              if (result == null) {
-                // Apartment was deleted - refresh the list
-                setState(() {});
-              } else if (result is Apartment) {
-                // Apartment was updated - update the list
-                setState(() {});
-              }
-            }
-          },
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8.0, 8.0, 8.0, 0),
-                child: Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12.0),
-                    border: Border.all(
-                      color: const Color(0xFF004aad),
-                      width: 1.5,
-                    ),
+            return InkWell(
+              borderRadius: BorderRadius.circular(16.0),
+              onTap: () {
+                setState(() {
+                  _isExpanded = !_isExpanded;
+                });
+              },
+              onLongPress: () async {
+                final result = await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) =>
+                        ApartmentDetailsScreen(apartment: widget.apartment),
                   ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(10.0),
-                    child: SizedBox(
-                      height: 200,
-                      child: Stack(
+                );
+
+                if (mounted) {
+                  if (result == null) {
+                    setState(() {});
+                  } else if (result is Apartment) {
+                    setState(() {});
+                  }
+                }
+              },
+              child: Column(
+                children: [
+                  Stack(
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-// Replace the PageView.builder in the ApartmentCard with this:
-                          PageView.builder(
-                            controller: _pageController,
-                            itemCount: widget.apartment.imageUrls.length,
-                            itemBuilder: (context, index) {
-                              return GestureDetector(
-                                onHorizontalDragStart: (details) {
-                                  _pageController.position.hold(() {});
-                                },
-                                onHorizontalDragUpdate: (details) {
-                                  _pageController.position.moveTo(
-                                    _pageController.position.pixels -
-                                        details.primaryDelta!,
-                                    duration: Duration.zero,
-                                  );
-                                },
-                                onHorizontalDragEnd: (details) {
-                                  _pageController.position.animateTo(
-                                    _pageController.position.pixels -
-                                        details.primaryVelocity! * 0.1,
-                                    duration: const Duration(milliseconds: 300),
-                                    curve: Curves.easeOut,
-                                  );
-                                },
-                                child: Image.network(
-                                  widget.apartment.imageUrls[index],
-                                  fit: BoxFit.cover,
-                                  loadingBuilder: (context, child,
-                                      loadingProgress) {
-                                    if (loadingProgress == null) return child;
-                                    return Center(
-                                      child: CircularProgressIndicator(
-                                        value: loadingProgress
-                                            .expectedTotalBytes != null
-                                            ? loadingProgress
-                                            .cumulativeBytesLoaded /
-                                            loadingProgress.expectedTotalBytes!
-                                            : null,
-                                      ),
-                                    );
-                                  },
-                                  errorBuilder: (context, error, stackTrace) {
-                                    debugPrint('Error loading image: $error');
-                                    return Container(
-                                      color: Colors.grey[200],
-                                      child: Column(
-                                        mainAxisAlignment: MainAxisAlignment
-                                            .center,
-                                        children: [
-                                          const Icon(Icons.broken_image, size: 50,
-                                              color: Colors.grey),
-                                          Text('Failed to load image',
-                                              style: TextStyle(
-                                                  color: Colors.grey[600])),
-                                        ],
-                                      ),
-                                    );
-                                  },
-                                ),
-                              );
-                            },
-                            onPageChanged: (int page) {
-                              setState(() {
-                                _currentPage = page;
-                              });
-                            },
-                          ),
-                          if (widget.apartment.imageUrls.length > 1)
-                            Positioned(
-                              bottom: 10,
-                              left: 0,
-                              right: 0,
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: List<Widget>.generate(
-                                  widget.apartment.imageUrls.length,
-                                      (index) =>
-                                      GestureDetector(
-                                        onTap: () {
-                                          _pageController.animateToPage(
-                                            index,
-                                            duration: const Duration(
-                                                milliseconds: 300),
-                                            curve: Curves.easeInOut,
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(8.0, 8.0, 8.0, 0),
+                            child: Container(
+                              decoration: const BoxDecoration(),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(10.0),
+                                child: SizedBox(
+                                  height: 200,
+                                  child: Stack(
+                                    children: [
+                                      PageView.builder(
+                                        controller: _pageController,
+                                        itemCount: widget.apartment.imageUrls.length,
+                                        itemBuilder: (context, index) {
+                                          return GestureDetector(
+                                            onHorizontalDragStart: (details) {
+                                              _pageController.position.hold(() {});
+                                            },
+                                            onHorizontalDragUpdate: (details) {
+                                              _pageController.position.moveTo(
+                                                _pageController.position.pixels -
+                                                    details.primaryDelta!,
+                                                duration: Duration.zero,
+                                              );
+                                            },
+                                            onHorizontalDragEnd: (details) {
+                                              _pageController.position.animateTo(
+                                                _pageController.position.pixels -
+                                                    details.primaryVelocity! * 0.1,
+                                                duration: const Duration(milliseconds: 300),
+                                                curve: Curves.easeOut,
+                                              );
+                                            },
+                                            child: Image.network(
+                                              widget.apartment.imageUrls[index],
+                                              fit: BoxFit.cover,
+                                              loadingBuilder: (context, child,
+                                                  loadingProgress) {
+                                                if (loadingProgress == null) return child;
+                                                return Center(
+                                                  child: CircularProgressIndicator(
+                                                    value: loadingProgress
+                                                        .expectedTotalBytes != null
+                                                        ? loadingProgress
+                                                        .cumulativeBytesLoaded /
+                                                        loadingProgress.expectedTotalBytes!
+                                                        : null,
+                                                  ),
+                                                );
+                                              },
+                                              errorBuilder: (context, error, stackTrace) {
+                                                debugPrint('Error loading image: $error');
+                                                return Container(
+                                                  color: Colors.grey[200],
+                                                  child: Column(
+                                                    mainAxisAlignment: MainAxisAlignment
+                                                        .center,
+                                                    children: [
+                                                      const Icon(Icons.broken_image, size: 50,
+                                                          color: Colors.grey),
+                                                      Text('Failed to load image',
+                                                          style: TextStyle(
+                                                              color: Colors.grey[600])),
+                                                    ],
+                                                  ),
+                                                );
+                                              },
+                                            ),
                                           );
                                         },
+                                        onPageChanged: (int page) {
+                                          setState(() {
+                                            _currentPage = page;
+                                          });
+                                        },
+                                      ),
+                                      // Inner shadow
+                                      Align(
+                                        alignment: Alignment.topCenter,
                                         child: Container(
-                                          width: 8,
-                                          height: 8,
-                                          margin: const EdgeInsets.symmetric(
-                                              horizontal: 4),
+                                          height: 15.0,
                                           decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: _currentPage == index
-                                                ? Colors.white
-                                                : Colors.white.withOpacity(0.5),
+                                            gradient: LinearGradient(
+                                              begin: Alignment.topCenter,
+                                              end: Alignment.bottomCenter,
+                                              colors: [Colors.black.withOpacity(0.5), Colors.transparent],
+                                            ),
                                           ),
                                         ),
                                       ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            widget.apartment.geAddress,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 18,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.share, color: Color(0xFF004aad)),
-                          onPressed: _showShareOptionsDialog,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      widget.apartment.ownerNumber.isNotEmpty
-                          ? 'მეპატრონე: \n${widget.ownerName} — ${widget.apartment
-                          .ownerNumber}'
-                          : 'მეპატრონე: \n${widget.ownerName}',
-                      style: TextStyle(
-                        color: Colors.grey[600],
-                        fontSize: 14,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: widget.apartment.tags
-                            .map((tag) =>
-                            Container(
-                              margin: const EdgeInsets.only(right: 8.0),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF004aad).withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(
-                                  color: const Color(0xFF004aad).withOpacity(0.5),
-                                  width: 1,
-                                ),
-                              ),
-                              child: Text(
-                                tag,
-                                style: const TextStyle(
-                                  color: Color(0xFF004aad),
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ))
-                            .toList(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        GestureDetector(
-                          onLongPress: () => _showPriceEditDialog('Daily'),
-                          child: _buildPriceLabel(
-                            price: widget.apartment.dailyPrice,
-                            unit: '₾/დღე',
-                            isPrimary: isDailyEmphasis,
-                          ),
-                        ),
-                        GestureDetector(
-                          onLongPress: () => _showPriceEditDialog('Monthly'),
-                          child: _buildPriceLabel(
-                            price: widget.apartment.monthlyPrice,
-                            unit: '\$/თვე',
-                            isPrimary: !isDailyEmphasis,
-                            isUSD: true,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    _buildInfoRow(
-                      rooms: widget.apartment.geAppRoom,
-                      bedrooms: widget.apartment.geAppBedroom,
-                      squareMeters: widget.apartment.squareMeters,
-                      peopleCapacity: widget.apartment.peopleCapacity,
-                    ),
-                    const SizedBox(height: 8),
-                    // Use ValueListenableBuilder for dynamic content
-                    ValueListenableBuilder<Set<DateTime>>(
-                      valueListenable: bookedDatesNotifier,
-                      builder: (context, bookedDatesSet, child) {
-                        final nearestAvailabilityStatus = _getNearestAvailabilityStatus(
-                            bookedDatesSet);
-                        final allAvailabilityPeriods = _getAvailabilityPeriods(
-                            bookedDatesSet, widget.apartment.bookingInfo);
-                        final bool isUnbooking = _startDate != null &&
-                            _endDate != null &&
-                            _isEntireRangeBooked(bookedDatesSet);
-
-                        return Column(
-                          children: [
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                decoration: BoxDecoration(
-                                  color: nearestAvailabilityStatus['color'] == Colors.red
-                                      ? Colors.red
-                                      : nearestAvailabilityStatus['color'] == Colors.green
-                                      ? Colors.green
-                                      : Colors.yellow.shade700,
-                                  borderRadius: BorderRadius.circular(20),
-                                  border: Border.all(
-                                    color: nearestAvailabilityStatus['color'],
-                                    width: 1,
-                                  ),
-                                ),
-                                child: Text(
-                                  nearestAvailabilityStatus['text'],
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 12,
-                                    shadows: [
-                                      Shadow(
-                                        color: Colors.black.withOpacity(0.6),
-                                        blurRadius: 1.5,
-                                        offset: const Offset(1, 1),
+                                      Align(
+                                        alignment: Alignment.bottomCenter,
+                                        child: Container(
+                                          height: 15.0,
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(
+                                              begin: Alignment.bottomCenter,
+                                              end: Alignment.topCenter,
+                                              colors: [Colors.black.withOpacity(0.5), Colors.transparent],
+                                            ),
+                                          ),
+                                        ),
                                       ),
+                                      Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: Container(
+                                          width: 15.0,
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(
+                                              begin: Alignment.centerLeft,
+                                              end: Alignment.centerRight,
+                                              colors: [Colors.black.withOpacity(0.5), Colors.transparent],
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      Align(
+                                        alignment: Alignment.centerRight,
+                                        child: Container(
+                                          width: 15.0,
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(
+                                              begin: Alignment.centerRight,
+                                              end: Alignment.centerLeft,
+                                              colors: [Colors.black.withOpacity(0.5), Colors.transparent],
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      if (widget.apartment.imageUrls.length > 1)
+                                        Positioned(
+                                          bottom: 10,
+                                          left: 0,
+                                          right: 0,
+                                          child: Row(
+                                            mainAxisAlignment: MainAxisAlignment.center,
+                                            children: List<Widget>.generate(
+                                              widget.apartment.imageUrls.length,
+                                                  (index) =>
+                                                  GestureDetector(
+                                                    onTap: () {
+                                                      _pageController.animateToPage(
+                                                        index,
+                                                        duration: const Duration(milliseconds: 300),
+                                                        curve: Curves.easeInOut,
+                                                      );
+                                                    },
+                                                    child: Container(
+                                                      width: 8,
+                                                      height: 8,
+                                                      margin: const EdgeInsets.symmetric(horizontal: 4),
+                                                      decoration: BoxDecoration(
+                                                        shape: BoxShape.circle,
+                                                        color: _currentPage == index
+                                                            ? Colors.white
+                                                            : Colors.white.withOpacity(0.5),
+                                                      ),
+                                                    ),
+                                                  ),
+                                            ),
+                                          ),
+                                        ),
                                     ],
                                   ),
                                 ),
                               ),
                             ),
-                            AnimatedSize(
-                              duration: const Duration(milliseconds: 300),
-                              curve: Curves.easeInOut,
-                              child: _isExpanded
-                                  ? Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Divider(
-                                    color: const Color(0xFF004aad).withOpacity(
-                                        0.5),
-                                    thickness: 1.5,
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.all(16.0),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        widget.apartment.geAddress,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 18,
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.share, color: Color(0xFF004aad)),
+                                      onPressed: _showShareOptionsDialog,
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  widget.apartment.ownerNumber.isNotEmpty
+                                      ? 'მეპატრონე: \n${widget.ownerName} — ${widget.apartment.ownerNumber}'
+                                      : 'მეპატრონე: \n${widget.ownerName}',
+                                  style: TextStyle(
+                                    color: Colors.grey[600],
+                                    fontSize: 14,
                                   ),
-                                  const SizedBox(height: 12),
-                                  _buildCalendar(
-                                      bookedDatesSet, allAvailabilityPeriods),
-                                  const SizedBox(height: 16),
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Expanded(
-                                        child: ElevatedButton(
-                                          // MODIFIED: Enable button only if an existing booking is selected OR the new range is at least 2 days.
-                                          onPressed: (_startDate != null && _endDate != null) && (isUnbooking || _endDate!.isAfter(_startDate!))
-                                              ? () {
-                                            // Decide which action to perform
-                                            if (isUnbooking) {
-                                              _editBooking(); // An existing booking is selected, so we edit
-                                            } else {
-                                              _bookApartment(); // A new range is selected, so we book
-                                            }
-                                          }
-                                              : null,
-                                          style: ElevatedButton.styleFrom(
-                                            foregroundColor: Colors.white,
-                                            // Use different colors for "Edit" and "Book" modes
-                                            backgroundColor: isUnbooking
-                                                ? const Color(0xFF5A9FFF) // Edit button color
-                                                : const Color(0xFF004aad), // Book button color
-                                            shape: RoundedRectangleBorder(
-                                              borderRadius: BorderRadius.circular(12),
+                                ),
+                                const SizedBox(height: 12),
+                                SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: Row(
+                                    children: widget.apartment.tags
+                                        .map((tag) =>
+                                        Container(
+                                          margin: const EdgeInsets.only(right: 8.0),
+                                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF004aad).withOpacity(0.1),
+                                            borderRadius: BorderRadius.circular(16),
+                                            border: Border.all(
+                                              color: const Color(0xFF004aad).withOpacity(0.5),
+                                              width: 1,
                                             ),
-                                            padding: const EdgeInsets.symmetric(vertical: 16),
                                           ),
                                           child: Text(
-                                            isUnbooking ? 'დეტალები' : 'დაჯავშნა', // Change text based on mode
+                                            tag,
                                             style: const TextStyle(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.bold,
-                                              // Add shadow for better readability
-                                              shadows: <Shadow>[
-                                                Shadow(
-                                                  offset: Offset(1.0, 1.0),
-                                                  blurRadius: 2.0,
-                                                  color: Color.fromARGB(128, 0, 0, 0),
-                                                ),
-                                              ],
+                                              color: Color(0xFF004aad),
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w500,
                                             ),
                                           ),
-                                        ),
-                                      ),
-                                    ],
+                                        ))
+                                        .toList(),
                                   ),
-                                ],
-                              )
-                                  : const SizedBox.shrink(),
+                                ),
+                                const SizedBox(height: 12),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    GestureDetector(
+                                      onLongPress: () => _showPriceEditDialog('Daily'),
+                                      child: _buildPriceLabel(
+                                        price: widget.apartment.dailyPrice,
+                                        unit: '₾/დღე',
+                                        isPrimary: isDailyEmphasis,
+                                      ),
+                                    ),
+                                    GestureDetector(
+                                      onLongPress: () => _showPriceEditDialog('Monthly'),
+                                      child: _buildPriceLabel(
+                                        price: widget.apartment.monthlyPrice,
+                                        unit: '\$/თვე',
+                                        isPrimary: !isDailyEmphasis,
+                                        isUSD: true,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 12),
+                                _buildInfoRow(
+                                  rooms: widget.apartment.geAppRoom,
+                                  bedrooms: widget.apartment.geAppBedroom,
+                                  squareMeters: widget.apartment.squareMeters,
+                                  peopleCapacity: widget.apartment.peopleCapacity,
+                                ),
+                                const SizedBox(height: 8),
+                                Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: nearestAvailabilityStatus['color'] == Colors.red
+                                          ? Colors.red
+                                          : nearestAvailabilityStatus['color'] == Colors.green
+                                          ? Colors.green
+                                          : Colors.yellow.shade700,
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                        color: nearestAvailabilityStatus['color'],
+                                        width: 1,
+                                      ),
+                                    ),
+                                    child: Text(
+                                      nearestAvailabilityStatus['text'],
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 12,
+                                        shadows: [
+                                          Shadow(
+                                            color: Colors.black.withOpacity(0.6),
+                                            blurRadius: 1.5,
+                                            offset: const Offset(1, 1),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
-                        );
-                      },
+                          ),
+                        ],
+                      ),
+                      Positioned(
+                        bottom: 12,
+                        right: 12,
+                        child: _buildPinOrSelectWidget(),
+                      ),
+                    ],
+                  ),
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeInOut,
+                    child: _isExpanded
+                        ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Divider(
+                          color: const Color(0xFF004aad).withOpacity(0.5),
+                          thickness: 1.5,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildCalendar(bookedDatesSet, allAvailabilityPeriods),
+                        const SizedBox(height: 16),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Expanded(
+                                child: ElevatedButton(
+                                  onPressed: (_startDate != null && _endDate != null) && (isUnbooking || _endDate!.isAfter(_startDate!))
+                                      ? () {
+                                    if (isUnbooking) {
+                                      _editBooking();
+                                    } else {
+                                      _bookApartment();
+                                    }
+                                  }
+                                      : null,
+                                  style: ElevatedButton.styleFrom(
+                                    foregroundColor: Colors.white,
+                                    backgroundColor: isUnbooking
+                                        ? const Color(0xFF5A9FFF)
+                                        : const Color(0xFF004aad),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    padding: const EdgeInsets.symmetric(vertical: 16),
+                                  ),
+                                  child: Text(
+                                    isUnbooking ? 'დეტალები' : 'დაჯავშნა',
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      shadows: <Shadow>[
+                                        Shadow(
+                                          offset: Offset(1.0, 1.0),
+                                          blurRadius: 2.0,
+                                          color: Color.fromARGB(128, 0, 0, 0),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16), // Padding at the bottom when expanded
+                      ],
                     )
-                  ],
-                ),
+                        : const SizedBox.shrink(),
+                  ),
+                ],
               ),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );
@@ -2542,6 +3200,8 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
   final TextEditingController _guestNameController = TextEditingController();
   final TextEditingController _deleteConfirmationController =
   TextEditingController();
+  final TextEditingController _cleanerFeeController = TextEditingController();
+
 
   String _selectedNameForMyProfit = 'მაკოს';
   String _selectedNameForPartnerProfit = 'მაკოს';
@@ -2582,7 +3242,8 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
             _profitLeftToPayController.text ||
         _initialFormState['guestName'] != _guestNameController.text ||
         _initialFormState['selectedNameForPartnerProfit'] !=
-            _selectedNameForPartnerProfit;
+            _selectedNameForPartnerProfit ||
+        _initialFormState['cleanerFee'] != _cleanerFeeController.text;
   }
 
   void _captureInitialFormState() {
@@ -2594,6 +3255,7 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
       'profitLeftToPay': _profitLeftToPayController.text,
       'guestName': _guestNameController.text,
       'selectedNameForPartnerProfit': _selectedNameForPartnerProfit,
+      'cleanerFee': _cleanerFeeController.text,
     };
   }
 
@@ -2615,6 +3277,9 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
         data['selectedNameForMyProfit'] as String? ?? 'მაკოს';
     _selectedNameForPartnerProfit =
         data['selectedNameForPartnerProfit'] as String? ?? 'მაკოს';
+    _cleanerFeeController.text =
+        (data['cleanerFee'] as double? ?? 0.0).toStringAsFixed(0);
+
 
     _calculateProfit();
   }
@@ -2627,6 +3292,7 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
     _prepaymentLeftController.text = "0";
     _profitFromPrepaymentController.text = "0";
     _profitLeftToPayController.text = "0";
+    _cleanerFeeController.text = "0";
     _calculateProfit();
   }
 
@@ -2640,6 +3306,7 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
     _pricingOnTopController.dispose();
     _guestNameController.dispose();
     _deleteConfirmationController.dispose();
+    _cleanerFeeController.dispose();
     super.dispose();
   }
 
@@ -2655,44 +3322,91 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
                 _deleteConfirmationController.text == requiredText;
 
             return AlertDialog(
-              title: const Text('Delete Booking Confirmation'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                      'To delete this booking, please type the following exactly:'),
-                  const SizedBox(height: 8),
-                  const Text(
-                    requiredText,
-                    style: TextStyle(
-                        fontWeight: FontWeight.bold, color: Colors.red),
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _deleteConfirmationController,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Type here to confirm',
+              backgroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+              title: const Text(
+                'წაშლის დადასტურება',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF004aad),
+                ),
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'დასადასტურებლად აკრიფეთ:',
+                      style: TextStyle(color: Colors.black87),
                     ),
-                    onChanged: (value) {
-                      setDialogState(
-                              () {}); // Re-build dialog to check button state
-                    },
-                  ),
-                ],
+                    const SizedBox(height: 8),
+                    Text(
+                      requiredText,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.red,
+                          fontSize: 16),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _deleteConfirmationController,
+                      decoration: InputDecoration(
+                        hintText: requiredText,
+                        border: const OutlineInputBorder(
+                          borderSide: BorderSide(color: Color(0xFF004aad)),
+                        ),
+                        focusedBorder: const OutlineInputBorder(
+                          borderSide: BorderSide(color: Color(0xFF004aad), width: 2.0),
+                        ),
+                      ),
+                      onChanged: (value) {
+                        setDialogState(() {});
+                      },
+                    ),
+                  ],
+                ),
               ),
               actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Cancel'),
-                ),
-                ElevatedButton(
-                  onPressed: canDelete ? _deleteBooking : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('Confirm Deletion'),
+                Row(
+                  children: [
+                    Expanded(
+                      child: SizedBox(
+                        height: 44,
+                        child: TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.red,
+                            backgroundColor: Colors.grey.shade200,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
+                          child: const Text('გაუქმება'),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: SizedBox(
+                        height: 44,
+                        child: ElevatedButton(
+                          onPressed: canDelete ? _deleteBooking : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red,
+                            foregroundColor: Colors.white,
+                            disabledBackgroundColor: Colors.grey.shade400,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
+                          child: const Text('წაშლა'),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             );
@@ -2702,59 +3416,64 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
     );
   }
 
-  Future<void> _deleteBooking() async {
-    final docId = widget.initialBookingData?['docId'] as String?;
-    final bookingId = widget.initialBookingData?['bookingId'] as String?;
-    final apartmentId = widget.apartment.id;
+// In apartment_list_screen.dart, inside _BookingConfirmationDialogState,
+// replace the _deleteBooking method.
 
-    if (docId == null || bookingId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Error: Could not identify booking to delete.')),
+  Future<void> _deleteBooking() async {
+    // We now pass the entire map of the booking to be deleted.
+    if (widget.initialBookingData == null) {
+      // --- MODIFIED ---
+      CustomSnackBar.show(
+        context: context,
+        message: 'ვერ მოხერხდა ჯავშნის იდენტიფიკაცია წასაშლელად',
+        isError: true,
       );
       return;
     }
 
     try {
+      // --- THIS IS THE MODIFIED CALL ---
       await widget.firestoreService.deleteOngoingBooking(
-        docId: docId,
-        apartmentId: apartmentId,
-        bookingId: bookingId,
+        bookingData: widget.initialBookingData!,
       );
+      // ------------------------------------
 
       if (!mounted) return;
-      // Close both dialogs
       Navigator.of(context).pop(); // Close delete confirmation
       Navigator.of(context).pop(); // Close edit dialog
-
-      widget.onBookingSuccess(); // This resets the calendar selection
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Booking successfully deleted.'),
-          backgroundColor: Colors.green,
-        ),
+      widget.onBookingSuccess();
+      // --- MODIFIED ---
+      CustomSnackBar.show(
+        context: context,
+        message: 'ჯავშანი წარმატებით წაიშალა',
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to delete booking: $e')),
+      // --- MODIFIED ---
+      CustomSnackBar.show(
+        context: context,
+        message: 'ვერ მოხერხდა ჯავშნის წაშლა: $e',
+        isError: true,
       );
     }
   }
 
-  /// MODIFIED/FIXED: `_updateBooking` now shows a custom success dialog instead of a SnackBar.
+// In apartment_list_screen.dart, inside _BookingConfirmationDialogState...
   Future<void> _updateBooking() async {
     final docId = widget.initialBookingData?['docId'] as String?;
     if (docId == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Error: Booking ID not found.')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'ვერ მოიძებნა ჯავშნის ID',
+          isError: true,
         );
       }
       return;
     }
 
+    // This part remains the same
     final updatedData = {
       'startDate': widget.startDate,
       'endDate': widget.endDate,
@@ -2773,15 +3492,21 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
       'guestName': _guestNameController.text,
       'selectedNameForMyProfit': _selectedNameForMyProfit,
       'selectedNameForPartnerProfit': _selectedNameForPartnerProfit,
+      'cleanerFee': double.tryParse(_cleanerFeeController.text) ?? 0.0,
     };
 
     try {
-      await widget.firestoreService.updateOngoingBooking(docId, updatedData);
+      // --- THIS IS THE MODIFIED LINE ---
+      await widget.firestoreService.updateOngoingBooking(
+        initialData: widget.initialBookingData!,
+        updatedData: updatedData,
+      );
+      // ------------------------------------
+
       if (mounted) {
         Navigator.pop(context); // Close the main dialog
         widget.onBookingSuccess();
 
-        // Show success dialog
         showDialog(
           context: context,
           barrierDismissible: false,
@@ -2806,8 +3531,11 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to update booking: $e')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'ვერ მოხერხდა ჯავშნის განახლება: $e',
+          isError: true,
         );
       }
     }
@@ -2847,6 +3575,8 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
     }
   }
 
+
+
   void _calculateProfit() {
     if (_days <= 29) {
       _totalProfit = _days * _pricingOnTop;
@@ -2872,10 +3602,12 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
         const SizedBox(width: 4),
         _buildNameButton(
             'სალოს', selectedName == 'სალოს', () => onNameSelected('სალოს')),
+        const SizedBox(width: 4), // ADD THIS LINE
+        _buildNameButton( // ADD THIS ENTIRE WIDGET
+            'სხვას', selectedName == 'სხვას', () => onNameSelected('სხვას')),
       ],
     );
   }
-
   Widget _buildNameButton(String name, bool isSelected, VoidCallback onTap) {
     return GestureDetector(
       onTap: () {
@@ -2906,6 +3638,14 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
     );
   }
 
+  String _getNominativeName(String dativeName) {
+    if (dativeName == 'მაკოს') return 'მაკომ';
+    if (dativeName == 'მზიას') return 'მზიამ';
+    if (dativeName == 'სალოს') return 'სალომ';
+    if (dativeName == 'სხვას') return 'სხვამ';
+    return dativeName; // Fallback
+  }
+
   Widget _buildProfitDistribution() {
     final profitFromPrepayment =
         double.tryParse(_profitFromPrepaymentController.text) ?? 0.0;
@@ -2914,6 +3654,8 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
         double.tryParse(_prepaymentLeftController.text) ?? 0.0;
     final profitLeftToPay =
         double.tryParse(_profitLeftToPayController.text) ?? 0.0;
+    final cleanerFee = double.tryParse(_cleanerFeeController.text) ?? 0.0;
+
 
     final myShare = _profitLeft / 2 - profitFromPrepayment / 2;
     final partnerShare = _profitLeft / 2 + profitFromPrepayment / 2;
@@ -2923,6 +3665,48 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
 
     final currency = _days <= 29 ? '₾' : '\$';
     final isLari = currency == '₾';
+
+    // Logic for owner's share display
+    final ownerNetShare = _totalBasePrice - _totalProfit - cleanerFee;
+    Widget ownerValueWidget;
+
+    if (cleanerFee > 0) {
+      ownerValueWidget = RichText(
+        text: TextSpan(
+          style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: Colors.black,
+              fontFamily: 'FiraGO' // Ensure font matches
+          ),
+          children: [
+            TextSpan(
+              text: isLari
+                  ? '${ownerNetShare.toStringAsFixed(0)}$currency'
+                  : '$currency${ownerNetShare.toStringAsFixed(0)}',
+            ),
+            TextSpan(
+              text: isLari
+                  ? ' + ${cleanerFee.toStringAsFixed(0)}$currency დამლაგებლის თანხა'
+                  : ' + $currency${cleanerFee.toStringAsFixed(0)} დამლაგებლის თანხა',
+              style: const TextStyle(color: Colors.red, fontSize: 14),
+            ),
+          ],
+        ),
+      );
+    } else {
+      ownerValueWidget = Text(
+        isLari
+            ? '${(_totalBasePrice - _totalProfit).toStringAsFixed(0)}$currency'
+            : '$currency${(_totalBasePrice - _totalProfit).toStringAsFixed(0)}',
+        style: const TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+          color: Colors.black,
+        ),
+      );
+    }
+
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2936,13 +3720,21 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
           fontSize: 20,
         ),
         const SizedBox(height: 8),
-        _buildPricingRow(
-          'მეპატრონეს:',
-          isLari
-              ? '${(_totalBasePrice - _totalProfit).toStringAsFixed(0)}$currency'
-              : '$currency${(_totalBasePrice - _totalProfit).toStringAsFixed(0)}',
-          isBold: true,
-          fontSize: 18,
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'მეპატრონეს:',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              ownerValueWidget,
+            ],
+          ),
         ),
         const SizedBox(height: 8),
         _buildPricingRow(
@@ -3010,18 +3802,22 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
                   ),
                   RichText(
                     text: TextSpan(
+                      style: const TextStyle(
+                          fontSize: 14,
+                          color: Colors.blue,
+                          fontFamily: 'FiraGO'
+                      ),
                       children: [
                         TextSpan(
                           text: isLari
                               ? '${myFinalAmount.toStringAsFixed(0)}$currency'
                               : '$currency${myFinalAmount.toStringAsFixed(0)}',
-                          style: const TextStyle(fontSize: 14, color: Colors.blue),
                         ),
                         if (profitLeftToPay > 0)
                           TextSpan(
                             text: isLari
-                                ? ' + ${profitLeftToPay.toStringAsFixed(0)}$currency ჩემთვის მოსაცემი $_selectedNameForPartnerProfit'
-                                : ' + $currency${profitLeftToPay.toStringAsFixed(0)} ჩემთვის მოსაცემი $_selectedNameForPartnerProfit',
+                                ? ' + ${profitLeftToPay.toStringAsFixed(0)}$currency უნდა მომცეს ${_getNominativeName(_selectedNameForPartnerProfit)}'
+                                : ' + $currency${profitLeftToPay.toStringAsFixed(0)} უნდა მომცეს ${_getNominativeName(_selectedNameForPartnerProfit)}',
                             style: const TextStyle(fontSize: 14, color: Colors.green),
                           ),
                       ],
@@ -3039,18 +3835,22 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
                   ),
                   RichText(
                     text: TextSpan(
+                      style: const TextStyle(
+                          fontSize: 14,
+                          color: Colors.blue,
+                          fontFamily: 'FiraGO'
+                      ),
                       children: [
                         TextSpan(
                           text: isLari
                               ? '${partnerFinalAmount.toStringAsFixed(0)}$currency'
                               : '$currency${partnerFinalAmount.toStringAsFixed(0)}',
-                          style: const TextStyle(fontSize: 14, color: Colors.blue),
                         ),
                         if (prepaymentLeft > 0)
                           TextSpan(
                             text: isLari
-                                ? ' + ${prepaymentLeft.toStringAsFixed(0)}$currency ჩემგან მისაცემი $_selectedNameForPartnerProfit'
-                                : ' + $currency${prepaymentLeft.toStringAsFixed(0)} ჩემგან მისაცემი $_selectedNameForPartnerProfit',
+                                ? ' + ${prepaymentLeft.toStringAsFixed(0)}$currency უნდა მივცე $_selectedNameForPartnerProfit'
+                                : ' + $currency${prepaymentLeft.toStringAsFixed(0)} უნდა მივცე $_selectedNameForPartnerProfit',
                             style: const TextStyle(fontSize: 14, color: Colors.red),
                           ),
                       ],
@@ -3079,10 +3879,23 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
   }
 
   String _getDurationDisplay() {
-    if (_days <= 29) {
-      return '$_days ღამე';
+    // --- THIS IS THE MODIFIED METHOD ---
+
+    // Use the calendar-aware calculation to get accurate months and remaining days.
+    final (int months, int days) = _calculateMonthDayDifference(widget.startDate, widget.endDate);
+
+    if (months > 0) {
+      final monthString = '$months თვე';
+      // If there are remaining days, append them.
+      if (days > 0) {
+        return '$monthString და $days დღე'; // e.g., "1 თვე და 4 დღე"
+      } else {
+        return monthString; // e.g., "1 თვე"
+      }
     } else {
-      return '${_months.toInt()} თვე';
+      // If the duration is less than a full calendar month, display the total number of nights.
+      // The `_days` variable already holds the total night count.
+      return '$_days ღამე'; // e.g., "28 ღამე"
     }
   }
 
@@ -3092,6 +3905,21 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
     } else {
       return '\$${widget.apartment.monthlyPrice}/თვე';
     }
+  }
+
+// --- NEW: Helper function for calendar-aware month/day calculation ---
+  (int, int) _calculateMonthDayDifference(DateTime startDate, DateTime endDate) {
+    if (endDate.isBefore(startDate)) {
+      return (0, 0);
+    }
+    int months = (endDate.year - startDate.year) * 12 + endDate.month - startDate.month;
+    DateTime testDate = DateTime(startDate.year, startDate.month + months, startDate.day);
+    if (testDate.isAfter(endDate)) {
+      months--;
+    }
+    DateTime referenceDate = DateTime(startDate.year, startDate.month + months, startDate.day);
+    int days = endDate.difference(referenceDate).inDays;
+    return (months, days);
   }
 
   Future<void> _confirmBooking() async {
@@ -3131,77 +3959,87 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
           'guestName': _guestNameController.text,
           'selectedNameForMyProfit': _selectedNameForMyProfit,
           'selectedNameForPartnerProfit': _selectedNameForPartnerProfit,
+          'cleanerFee': double.tryParse(_cleanerFeeController.text) ?? 0.0,
         },
       );
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Successfully booked')),
-        );
-        widget.onBookingSuccess();
-        Navigator.pop(context);
-
-        if (_selectedDocumentType == DocumentType.invoice) {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => InvoiceGeneratorScreen(
-                prefilledData: {
-                  'apartment': apartment,
-                  'startDate': widget.startDate,
-                  'endDate': widget.endDate,
-                  'totalPrice': _totalBasePrice,
-                  'invoiceType': _days <= 29 ? 'Daily' : 'Monthly',
-                  'recipient': _guestNameController.text.isNotEmpty
-                      ? _guestNameController.text
-                      : 'კლიენტი',
-                },
-              ),
-            ),
-          );
-        } else if (_selectedDocumentType == DocumentType.contract) {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => const OngoingBookedApartmentsScreen(),
-            ),
-          );
-        }
-      }
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Successfully booked')),
+        CustomSnackBar.show(
+          context: context,
+          message: 'წარმატებით დაიჯავშნა',
         );
         widget.onBookingSuccess();
         Navigator.pop(context); // Closes the booking dialog
 
         if (_selectedDocumentType == DocumentType.invoice) {
+          String guidePersonForInvoice;
+          switch (_selectedNameForPartnerProfit) {
+            case 'მზიას':
+              guidePersonForInvoice = 'მზია გოგიტიძე';
+              break;
+            case 'სალოს':
+              guidePersonForInvoice = 'სალო ხელაძე';
+              break;
+            case 'მაკოს':
+            default:
+              guidePersonForInvoice = 'მაკო ნაკაიძე';
+          }
+
           Navigator.push(
             context,
             MaterialPageRoute(
               builder: (context) => InvoiceGeneratorScreen(
-                // Add this parameter to trigger the popup
                 showVerificationPopup: true,
                 prefilledData: {
                   'apartment': apartment,
                   'startDate': widget.startDate,
                   'endDate': widget.endDate,
-                  'totalPrice': _totalBasePrice,
-                  'invoiceType': _days <= 29 ? 'Daily' : 'Monthly',
-                  'recipient': _guestNameController.text.isNotEmpty
-                      ? _guestNameController.text
-                      : 'კლიენტი',
+                  'bookingPrice': _basePricePerUnit,
+                  'invoiceType': _days >= 30 ? 'Monthly' : 'Daily',
+                  'currency': _days >= 30 ? 'აშშ დოლარი' : 'ქართული ლარი',
+                  'recipient': 'კლიენტი',
+                  'guestName': _guestNameController.text,
+                  'prepayment': _prepaymentController.text,
+                  'guidePerson': guidePersonForInvoice,
+                  'ownerName': widget.apartment.ownerName,
                 },
               ),
             ),
           );
         } else if (_selectedDocumentType == DocumentType.contract) {
+          final String contractType = _days >= 30 ? 'Monthly' : 'Daily';
+
+          // --- FIX: Use new calendar-aware logic to calculate months and remaining days ---
+          final (int periodMonths, int periodDays) = _calculateMonthDayDifference(widget.startDate, widget.endDate);
+
+          final prefilledDataForContract = {
+            'contractType': contractType,
+            'city': apartment.city,
+            'currency': contractType != 'Daily' ? 'აშშ დოლარის' : 'ქართული ლარის',
+            'price': contractType != 'Daily' ? apartment.monthlyPrice : apartment.dailyPrice,
+            'startDate': widget.startDate,
+            'period': contractType == 'Daily' ? _days.toString() : periodMonths.toString(),
+            'periodDays': contractType == 'Daily' ? '' : periodDays.toString(),
+            'prepayment': _prepaymentController.text,
+            'sqMeters': apartment.squareMeters,
+            'geAddress': apartment.geAddress,
+            'ruAddress': apartment.ruAddress,
+            'ownerNameGe': apartment.ownerName,
+            'ownerNameRu': apartment.ownerNameRu,
+            'ownerIdNumber': apartment.ownerID,
+            'ownerBirthDate': apartment.ownerBD,
+            'ownerBankName': apartment.ownerBankName,
+            'ownerBankAccount': apartment.ownerBank,
+            'guestNameGe': _guestNameController.text,
+          };
+
           Navigator.push(
             context,
             MaterialPageRoute(
-              // Add this parameter to trigger the popup
-              builder: (context) => const ContractFormScreen(showVerificationPopup: true),
+              builder: (context) => ContractFormScreen(
+                showVerificationPopup: true,
+                prefilledData: prefilledDataForContract,
+              ),
             ),
           );
         }
@@ -3212,8 +4050,10 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
         widget.bookedDatesNotifier.value =
         Set<DateTime>.from(widget.bookedDatesNotifier.value)
           ..removeAll(dates);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Booking failed: $e')),
+        CustomSnackBar.show(
+          context: context,
+          message: 'ვერ მოხერხდა დაჯავშნა: $e',
+          isError: true,
         );
       }
     }
@@ -3588,6 +4428,22 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
                 ),
                 const SizedBox(height: 16),
                 TextField(
+                  controller: _cleanerFeeController,
+                  decoration: InputDecoration(
+                    labelText: 'დამლაგებლის თანხა (${_days <= 29 ? '₾' : '\$'})',
+                    border: const OutlineInputBorder(),
+                    contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    labelStyle: labelTextStyle,
+                    focusedBorder: focusedBorderStyle,
+                  ),
+                  keyboardType: TextInputType.number,
+                  onChanged: (value) {
+                    setState(() {});
+                  },
+                ),
+                const SizedBox(height: 16),
+                TextField(
                   controller: _profitLeftToPayController,
                   decoration: InputDecoration(
                     labelText:
@@ -3679,7 +4535,7 @@ class _BookingConfirmationDialogState extends State<BookingConfirmationDialog> {
                           child: Text(
                             _isEditMode ? 'შენახვა' : 'დადასტურება',
                             style: const TextStyle(
-                              fontSize: 16,
+                              fontSize: 14,
                               color: Colors.white,
                             ),
                           ),

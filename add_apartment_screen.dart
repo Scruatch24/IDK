@@ -1,4 +1,3 @@
-// lib/screens/add_apartment_screen.dart
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:intl/date_symbol_data_local.dart'; // ADD this import for Georgian dates
@@ -11,6 +10,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui'; // Needed for lerpDouble
 import 'package:dropdown_search/dropdown_search.dart';
+import '../utils/custom_snackbar.dart'; // <-- IMPORT THE NEW SNACKBAR HELPER
 
 class AddApartmentScreen extends StatefulWidget {
   const AddApartmentScreen({super.key});
@@ -265,8 +265,11 @@ class _AddApartmentScreenState extends State<AddApartmentScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('სურათების არჩევის შეცდომა: $e')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'სურათების არჩევის შეცდომა: $e',
+          isError: true,
         );
       }
     }
@@ -531,8 +534,11 @@ class _AddApartmentScreenState extends State<AddApartmentScreen> {
 
     if (_selectedImages.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('გთხოვთ დაამატოთ მინიმუმ ერთი სურათი')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'გთხოვთ დაამატოთ მინიმუმ ერთი სურათი',
+          isError: true,
         );
       }
       return;
@@ -555,8 +561,11 @@ class _AddApartmentScreenState extends State<AddApartmentScreen> {
           imageUrls.add(url);
         } catch (e) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('სურათის ატვირთვა ვერ მოხერხდა: ${e.toString()}')),
+            // --- MODIFIED ---
+            CustomSnackBar.show(
+              context: context,
+              message: 'სურათის ატვირთვა ვერ მოხერხდა: ${e.toString()}',
+              isError: true,
             );
           }
           setState(() {
@@ -609,15 +618,20 @@ class _AddApartmentScreenState extends State<AddApartmentScreen> {
           .saveApartment(newApartment);
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('ბინა წარმატებით დაემატა!')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'ბინა წარმატებით დაემატა!',
         );
         Navigator.of(context).pop(true);
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('ბინის შენახვა ვერ მოხერხდა: ${e.toString()}')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'ბინის შენახვა ვერ მოხერხდა: ${e.toString()}',
+          isError: true,
         );
       }
     } finally {
@@ -1074,20 +1088,20 @@ class _AddApartmentScreenState extends State<AddApartmentScreen> {
               ),
               const SizedBox(height: 16),
               _buildAnimatedTextFieldRow(
-                  geController: _ownerNameController,
-                  ruController: _ownerNameRuController,
-                  geLabel: 'სახელი (ქართულად)',
-                  ruLabel: '(რუს./ინგ.)',
-                  geFocusNode: _geOwnerNameFocusNode,
-                  ruFocusNode: _ruOwnerNameFocusNode,
-                  isRuDominant: _isRuOwnerNameDominant,
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'გთხოვთ შეიყვანოთ მეპატრონის სახელი';
-                    }
-                    return null;
-                  },
-                  onChanged: (_) => _handleManualFieldChange(),
+                geController: _ownerNameController,
+                ruController: _ownerNameRuController,
+                geLabel: 'სახელი (ქართულად)',
+                ruLabel: '(რუს./ინგ.)',
+                geFocusNode: _geOwnerNameFocusNode,
+                ruFocusNode: _ruOwnerNameFocusNode,
+                isRuDominant: _isRuOwnerNameDominant,
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'გთხოვთ შეიყვანოთ მეპატრონის სახელი';
+                  }
+                  return null;
+                },
+                onChanged: (_) => _handleManualFieldChange(),
               ),
               const SizedBox(height: 16),
               _buildModernTextField(

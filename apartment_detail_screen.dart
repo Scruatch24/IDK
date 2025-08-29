@@ -10,6 +10,10 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'dart:typed_data';
 import 'package:flutter_calendar_carousel/flutter_calendar_carousel.dart';
+import 'package:realtor_app/invoice_generator_screen.dart';
+import 'package:realtor_app/contract_form_screen.dart';
+import '../utils/custom_snackbar.dart'; // <-- IMPORT THE NEW SNACKBAR HELPER
+
 
 class ApartmentDetailsScreen extends StatefulWidget {
   Apartment apartment;
@@ -22,20 +26,15 @@ class ApartmentDetailsScreen extends StatefulWidget {
 
 class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
     with TickerProviderStateMixin {
-
-
+  // --- UNDO SYSTEM VARIABLES REMOVED ---
 
   // Existing variables
   int _currentImageIndex = 0;
   late PageController _pageController;
   bool _isOwnerExpanded = false; // State for the new Owner collapsible
-  final TextEditingController _deleteConfirmationController = TextEditingController();
-  Apartment? _deletedApartment;
-  Timer? _undoTimer;
-  bool _showUndoWidget = false;
-  List<String>? _deletedImageUrls;
-  // New variable for success message
-  bool _showSuccessMessage = false;
+  final TextEditingController _deleteConfirmationController =
+  TextEditingController();
+  bool _isSaving = false;
 
   // FAB Animation variables
   late AnimationController _animationController;
@@ -79,35 +78,47 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
     });
 
     _fabAnimations = [
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 200)),
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 200)),
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 200)),
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 200)),
+      AnimationController(
+          vsync: this, duration: const Duration(milliseconds: 200)),
+      AnimationController(
+          vsync: this, duration: const Duration(milliseconds: 200)),
+      AnimationController(
+          vsync: this, duration: const Duration(milliseconds: 200)),
+      AnimationController(
+          vsync: this, duration: const Duration(milliseconds: 200)),
     ];
 
-    _fabScales = _fabAnimations.map((controller) =>
+    _fabScales = _fabAnimations
+        .map((controller) =>
         Tween<double>(begin: 0.0, end: 1.0).animate(
           CurvedAnimation(
             parent: controller,
             curve: Curves.easeOutBack,
           ),
-        )
-    ).toList();
+        ))
+        .toList();
 
-    _fabFades = _fabAnimations.map((controller) =>
+    _fabFades = _fabAnimations
+        .map((controller) =>
         Tween<double>(begin: 0.0, end: 1.0).animate(
           CurvedAnimation(
             parent: controller,
             curve: const Interval(0.0, 0.7, curve: Curves.easeOut),
           ),
-        )
-    ).toList();
+        ))
+        .toList();
 
     _fabChildren = [
-      _buildFabChild(0, Icons.delete, 'წაშლა', Colors.red, _showDeleteConfirmationDialog),
-      _buildFabChild(1, Icons.edit, 'რედაქტირება', const Color(0xFF004aad), _handleEdit),
-      _buildFabChild(2, Icons.description, 'ხელშეკრულება', const Color(0xFF004aad), () {}),
-      _buildFabChild(3, Icons.receipt, 'ინვოისი', const Color(0xFF004aad), () {}),
+      _buildFabChild(0, Icons.delete, 'წაშლა', Colors.red,
+          _showDeleteConfirmationDialog),
+      _buildFabChild(
+          1, Icons.edit, 'რედაქტირება', const Color(0xFF004aad), _handleEdit),
+      // --- MODIFICATION START ---
+      _buildFabChild(2, Icons.assignment, 'ხელშეკრულება', // Changed from Icons.description
+          const Color(0xFF004aad), _navigateToContract),
+      _buildFabChild(3, Icons.receipt_long, 'ინვოისი', const Color(0xFF004aad), // Changed from Icons.receipt
+          _navigateToInvoice),
+      // --- MODIFICATION END ---
     ];
   }
 
@@ -119,11 +130,12 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
     }
     _pageController.dispose();
     _deleteConfirmationController.dispose();
-    _undoTimer?.cancel();
+    // --- UNDO TIMER REMOVED ---
     super.dispose();
   }
 
-  Widget _buildFabChild(int index, IconData icon, String tooltip, Color bgColor, VoidCallback onPressed) {
+  Widget _buildFabChild(
+      int index, IconData icon, String tooltip, Color bgColor, VoidCallback onPressed) {
     return ScaleTransition(
       scale: _fabScales[index],
       child: FadeTransition(
@@ -172,12 +184,9 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
     });
   }
 
-
-
   void _animateFabChildren(bool isOpening) {
     const staggerDuration = Duration(milliseconds: 50);
     if (isOpening) {
-      // Animate from bottom to top
       for (int i = _fabAnimations.length - 1; i >= 0; i--) {
         Future.delayed(staggerDuration * (_fabAnimations.length - 1 - i), () {
           if (mounted) {
@@ -186,7 +195,6 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
         });
       }
     } else {
-      // Animate from top to bottom
       for (int i = 0; i < _fabAnimations.length; i++) {
         Future.delayed(staggerDuration * i, () {
           if (mounted) {
@@ -210,8 +218,60 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
     }
   }
 
+  void _navigateToInvoice() {
+    _toggleFabMenu();
+    final apartment = widget.apartment;
+    final prefilledData = {
+      'apartment': apartment,
+      'bookingPrice': apartment.dailyPrice,
+      'invoiceType': 'Daily',
+      'currency': 'ქართული ლარი',
+      'recipient': 'კლიენტი',
+      'ownerName': apartment.ownerName,
+    };
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => InvoiceGeneratorScreen(
+          prefilledData: prefilledData,
+        ),
+      ),
+    );
+  }
+
+  void _navigateToContract() {
+    _toggleFabMenu();
+    final apartment = widget.apartment;
+    final prefilledData = {
+      'contractType': 'Monthly',
+      'city': apartment.city,
+      'currency': 'აშშ დოლარის',
+      'price': apartment.monthlyPrice,
+      'sqMeters': apartment.squareMeters,
+      'geAddress': apartment.geAddress,
+      'ruAddress': apartment.ruAddress,
+      'ownerNameGe': apartment.ownerName,
+      'ownerNameRu': apartment.ownerNameRu,
+      'ownerIdNumber': apartment.ownerID,
+      'ownerBirthDate': apartment.ownerBD,
+      'ownerBankName': apartment.ownerBankName,
+      'ownerBankAccount': apartment.ownerBank,
+    };
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ContractFormScreen(
+          prefilledData: prefilledData,
+        ),
+      ),
+    );
+  }
+
   Future<void> _showDeleteConfirmationDialog() async {
     _toggleFabMenu();
+    _deleteConfirmationController.clear();
+    const String requiredText = 'ბინის წაშლა';
+
     return showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -219,43 +279,102 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
         return StatefulBuilder(
           builder: (context, setState) {
             return AlertDialog(
-              title: const Text('წაშლის დადასტურება'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('ჩაწერეთ "წაშლა" დასადასტურებლად:'),
-                  const SizedBox(height: 16),
-                  TextField(
-                    autofocus: true,
-                    controller: _deleteConfirmationController,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      hintText: 'წაშლა',
+              backgroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+              title: const Text(
+                'წაშლის დადასტურება',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF004aad),
+                ),
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'დასადასტურებლად აკრიფეთ:',
+                      style: TextStyle(color: Colors.black87),
                     ),
-                    onChanged: (value) => setState(() {}),
-                  ),
-                ],
+                    const SizedBox(height: 8),
+                    const Text(
+                      requiredText,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.red,
+                        fontSize: 16,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      autofocus: false,
+                      controller: _deleteConfirmationController,
+                      decoration: InputDecoration(
+                        hintText: requiredText,
+                        border: const OutlineInputBorder(
+                          borderSide: BorderSide(color: Color(0xFF004aad)),
+                        ),
+                        focusedBorder: const OutlineInputBorder(
+                          borderSide:
+                          BorderSide(color: Color(0xFF004aad), width: 2.0),
+                        ),
+                      ),
+                      onChanged: (value) => setState(() {}),
+                    ),
+                  ],
+                ),
               ),
               actions: <Widget>[
-                TextButton(
-                  child: const Text('გაუქმება'),
-                  onPressed: () {
-                    _deleteConfirmationController.clear();
-                    Navigator.of(context).pop();
-                  },
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('წაშლა'),
-                  onPressed: _deleteConfirmationController.text.trim() == 'წაშლა'
-                      ? () async {
-                    Navigator.of(context).pop();
-                    await _deleteApartmentWithImages();
-                  }
-                      : null,
+                Row(
+                  children: [
+                    Expanded(
+                      child: SizedBox(
+                        height: 44,
+                        child: TextButton(
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.red,
+                            backgroundColor: Colors.grey.shade200,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8.0),
+                            ),
+                          ),
+                          child: const Text('გაუქმება'),
+                          onPressed: () {
+                            _deleteConfirmationController.clear();
+                            Navigator.of(context).pop();
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: SizedBox(
+                        height: 44,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red,
+                            foregroundColor: Colors.white,
+                            disabledBackgroundColor: Colors.grey.shade400,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8.0),
+                            ),
+                          ),
+                          child: const Text('წაშლა'),
+                          onPressed:
+                          _deleteConfirmationController.text.trim() ==
+                              requiredText
+                              ? () async {
+                            Navigator.of(context).pop();
+                            await _deleteApartmentWithImages();
+                          }
+                              : null,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             );
@@ -265,202 +384,51 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
     );
   }
 
-  bool _isSaving = false;
-
+  // --- DELETION LOGIC SIMPLIFIED ---
   Future<void> _deleteApartmentWithImages() async {
+    if (!mounted) return;
+
+    setState(() {
+      _isSaving = true;
+    });
+
     try {
-      setState(() {
-        _deletedApartment = widget.apartment;
-        _deletedImageUrls = List.from(widget.apartment.imageUrls);
-        _showUndoWidget = true;
-        _isSaving = true;
-      });
+      // Directly call the service that deletes both Firestore data and Storage images.
+      await Provider.of<FirestoreService>(context, listen: false)
+          .deleteApartmentWithImages(widget.apartment);
 
-      _undoTimer = Timer(const Duration(milliseconds: 3500), () async {
-        if (!mounted || !_showUndoWidget) return;
-
-        try {
-          await FirestoreService().deleteApartmentWithImages(widget.apartment);
-
-          if (mounted) {
-            setState(() {
-              _showUndoWidget = false;
-              _deletedApartment = null;
-              _deletedImageUrls = null;
-              _isSaving = false;
-            });
-            // Return null instead of true to indicate successful deletion
-            Navigator.of(context).pop(null);
-          }
-        } catch (e) {
-          if (mounted) {
-            setState(() {
-              _showUndoWidget = false;
-              _isSaving = false;
-            });
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('ვერ მოხერხდა ბინის წაშლა: ${e.toString()}'),
-                backgroundColor: Colors.red,
-              ),
-            );
-          }
-        }
-      });
+      if (mounted) {
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'ბინა წარმატებით წაიშალა',
+        );
+        // Pop the screen to return to the previous view.
+        Navigator.of(context).pop(null);
+      }
     } catch (e) {
       if (mounted) {
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'ვერ მოხერხდა ბინის წაშლა: ${e.toString()}',
+          isError: true,
+        );
+      }
+    } finally {
+      if (mounted) {
         setState(() {
-          _showUndoWidget = false;
           _isSaving = false;
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('ვერ მოხერხდა ბინის წაშლა: ${e.toString()}'),
-            backgroundColor: Colors.red,
-          ),
-        );
       }
     }
   }
 
-  Future<void> _undoDelete() async {
-    if (_deletedApartment == null || !mounted) return;
+  // --- UNDO SYSTEM METHODS REMOVED ---
+  // _undoDelete() and _buildUndoWidget() have been removed.
 
-    try {
-      _undoTimer?.cancel();
-      setState(() {
-        _isSaving = true;
-      });
-
-      final restoredApartment = _deletedApartment!.copyWith(
-        imageUrls: _deletedImageUrls!,
-      );
-
-      await FirestoreService().saveApartment(restoredApartment);
-
-      if (mounted) {
-        setState(() {
-          _showUndoWidget = false;
-          _showSuccessMessage = true;
-          _isSaving = false;
-        });
-      }
-
-      Timer(const Duration(seconds: 2), () {
-        if (mounted) {
-          setState(() {
-            _showSuccessMessage = false;
-            _deletedApartment = null;
-            _deletedImageUrls = null;
-          });
-        }
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isSaving = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('ვერ მოხერხდა ბინის აღდგენა: ${e.toString()}'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
-  Widget _buildUndoWidget() {
-    return Positioned(
-      right: 16,
-      bottom: 24,
-      child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 300),
-        child: _showSuccessMessage
-            ? Container(
-          key: const ValueKey('success'),
-          width: MediaQuery.of(context).size.width - 100,
-          height: 40,
-          margin: const EdgeInsets.only(right: 72),
-          decoration: BoxDecoration(
-            color: Colors.green,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.2),
-                blurRadius: 8,
-                offset: const Offset(0, 4),
-              ),
-            ],
-          ),
-          alignment: Alignment.center,
-          child: const Text(
-            'წაშლა წარმატებით გაუქმდა',
-            style: TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.bold,
-            ),
-            textAlign: TextAlign.center,
-          ),
-        )
-            : AnimatedOpacity(
-          key: const ValueKey('undo'),
-          opacity: _showUndoWidget ? 1.0 : 0.0,
-          duration: const Duration(milliseconds: 300),
-          child: Container(
-            width: MediaQuery.of(context).size.width - 100,
-            height: 40,
-            margin: const EdgeInsets.only(right: 72),
-            decoration: BoxDecoration(
-              color: const Color(0xFF004aad),
-              borderRadius: BorderRadius.circular(20),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.2),
-                  blurRadius: 8,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'ბინა წაიშალა',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: _undoDelete,
-                    style: TextButton.styleFrom(
-                      padding: EdgeInsets.zero,
-                      minimumSize: const Size(50, 30),
-                      foregroundColor: Colors.white.withOpacity(0.2),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(15),
-                      ),
-                    ),
-                    child: const Text(
-                      'გაუქმება',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDetailRow(IconData icon, String label, String value, {TextStyle? labelStyle, TextStyle? valueStyle, double iconSize = 24.0}) {
+  Widget _buildDetailRow(IconData icon, String label, String value,
+      {TextStyle? labelStyle, TextStyle? valueStyle, double iconSize = 24.0}) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: Row(
@@ -474,18 +442,20 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
               children: [
                 Text(
                   label,
-                  style: labelStyle ?? TextStyle(
-                    color: Colors.grey[600],
-                    fontSize: 14,
-                  ),
+                  style: labelStyle ??
+                      TextStyle(
+                        color: Colors.grey[600],
+                        fontSize: 14,
+                      ),
                 ),
                 const SizedBox(height: 4),
                 Text(
                   value,
-                  style: valueStyle ?? const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w500,
-                  ),
+                  style: valueStyle ??
+                      const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                      ),
                 ),
               ],
             ),
@@ -512,23 +482,25 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
   Widget _buildAmenitiesSection(Apartment apartment) {
     final availableAmenities = <Widget>[];
     if (apartment.hasAC) {
-      availableAmenities.add(Expanded(child: _buildAmenityItem(Icons.ac_unit, 'კონდიციონერი')));
+      availableAmenities
+          .add(Expanded(child: _buildAmenityItem(Icons.ac_unit, 'კონდიციონერი')));
     }
     if (apartment.hasElevator) {
-      availableAmenities.add(Expanded(child: _buildAmenityItem(Icons.elevator, 'ლიფტი')));
+      availableAmenities
+          .add(Expanded(child: _buildAmenityItem(Icons.elevator, 'ლიფტი')));
     }
     if (apartment.hasWiFi) {
       availableAmenities.add(Expanded(child: _buildAmenityItem(Icons.wifi, 'Wi-Fi')));
     }
     if (apartment.warmWater) {
-      availableAmenities.add(Expanded(child: _buildAmenityItem(Icons.whatshot, 'ცხელი წყალი')));
+      availableAmenities
+          .add(Expanded(child: _buildAmenityItem(Icons.whatshot, 'ცხელი წყალი')));
     }
 
     if (availableAmenities.isEmpty) {
       return const SizedBox.shrink();
     }
 
-    // To ensure there are always 4 spaces, we add empty Expanded widgets
     while (availableAmenities.length < 4) {
       availableAmenities.add(Expanded(child: Container()));
     }
@@ -560,7 +532,8 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
     final apartment = widget.apartment;
 
     const ownerLabelStyle = TextStyle(color: Color(0xFF616161), fontSize: 11);
-    const ownerValueStyle = TextStyle(fontSize: 13, fontWeight: FontWeight.w500);
+    const ownerValueStyle =
+    TextStyle(fontSize: 13, fontWeight: FontWeight.w500);
 
     return Scaffold(
       appBar: AppBar(
@@ -601,7 +574,8 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                               if (loadingProgress == null) return child;
                               return Center(
                                 child: CircularProgressIndicator(
-                                  value: loadingProgress.expectedTotalBytes != null
+                                  value: loadingProgress.expectedTotalBytes !=
+                                      null
                                       ? loadingProgress.cumulativeBytesLoaded /
                                       loadingProgress.expectedTotalBytes!
                                       : null,
@@ -609,16 +583,22 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                               );
                             },
                             errorBuilder: (context, error, stackTrace) {
-                              debugPrint('ვერმოხერხდა სურათების ჩატვირთვა: $error');
+                              debugPrint(
+                                  'ვერმოხერხდა სურათების ჩატვირთვა: $error');
                               return Container(
                                 color: Colors.grey[200],
                                 child: Column(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
-                                    const Icon(Icons.broken_image, size: 50, color: Colors.grey),
-                                    Text('ვერმოხერხდა სურათების ჩატვირთვა', style: TextStyle(color: Colors.grey[600])),
+                                    const Icon(Icons.broken_image,
+                                        size: 50, color: Colors.grey),
+                                    Text('ვერმოხერხდა სურათების ჩატვირთვა',
+                                        style:
+                                        TextStyle(color: Colors.grey[600])),
                                     Text('URL: ${apartment.imageUrls[index]}',
-                                        style: TextStyle(color: Colors.grey[400], fontSize: 10)),
+                                        style: TextStyle(
+                                            color: Colors.grey[400],
+                                            fontSize: 10)),
                                   ],
                                 ),
                               );
@@ -638,7 +618,8 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                                   (index) => Container(
                                 width: 8,
                                 height: 8,
-                                margin: const EdgeInsets.symmetric(horizontal: 4),
+                                margin:
+                                const EdgeInsets.symmetric(horizontal: 4),
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
                                   color: _currentImageIndex == index
@@ -674,8 +655,8 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                             children: [
                               Text(
                                 isDailyEmphasis
-                                    ? '${NumberFormat('#,##0').format(apartment.dailyPrice)}₾ / day'
-                                    : '\$${NumberFormat('#,##0').format(apartment.monthlyPrice)} / month',
+                                    ? '${NumberFormat('#,##0').format(apartment.dailyPrice)}₾ / დღე'
+                                    : '\$${NumberFormat('#,##0').format(apartment.monthlyPrice)} / თვე',
                                 style: const TextStyle(
                                   fontSize: 18,
                                   fontWeight: FontWeight.bold,
@@ -684,8 +665,8 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                               ),
                               Text(
                                 isDailyEmphasis
-                                    ? '\$${NumberFormat('#,##0').format(apartment.monthlyPrice)} / month'
-                                    : '${NumberFormat('#,##0').format(apartment.dailyPrice)}₾ / day',
+                                    ? '\$${NumberFormat('#,##0').format(apartment.monthlyPrice)} / თვე'
+                                    : '${NumberFormat('#,##0').format(apartment.dailyPrice)}₾ / დღე',
                                 style: TextStyle(
                                   fontSize: 14,
                                   color: Colors.grey[600],
@@ -702,12 +683,15 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                           children: apartment.tags
                               .map((tag) => Container(
                             margin: const EdgeInsets.only(right: 8.0),
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 6),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF004aad).withOpacity(0.1),
+                              color: const Color(0xFF004aad)
+                                  .withOpacity(0.1),
                               borderRadius: BorderRadius.circular(16),
                               border: Border.all(
-                                color: const Color(0xFF004aad).withOpacity(0.5),
+                                color: const Color(0xFF004aad)
+                                    .withOpacity(0.5),
                                 width: 1,
                               ),
                             ),
@@ -747,9 +731,11 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                               )
                                   : BorderRadius.circular(12.0),
                               child: Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 16.0),
+                                padding: const EdgeInsets.symmetric(
+                                    vertical: 12.0, horizontal: 16.0),
                                 child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  mainAxisAlignment:
+                                  MainAxisAlignment.spaceBetween,
                                   children: [
                                     const Text(
                                       'მეპატრონე',
@@ -760,7 +746,8 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                                     ),
                                     AnimatedRotation(
                                       turns: _isOwnerExpanded ? 0.5 : 0.0,
-                                      duration: const Duration(milliseconds: 300),
+                                      duration:
+                                      const Duration(milliseconds: 300),
                                       child: const Icon(
                                         Icons.expand_more,
                                         color: Color(0xFF004aad),
@@ -773,7 +760,8 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                             AnimatedCrossFade(
                               firstChild: Container(),
                               secondChild: Container(
-                                padding: const EdgeInsets.fromLTRB(16.0, 0, 16.0, 16.0),
+                                padding: const EdgeInsets.fromLTRB(
+                                    16.0, 0, 16.0, 16.0),
                                 child: Column(
                                   children: [
                                     const Divider(height: 1),
@@ -839,7 +827,9 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                                   ],
                                 ),
                               ),
-                              crossFadeState: _isOwnerExpanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+                              crossFadeState: _isOwnerExpanded
+                                  ? CrossFadeState.showSecond
+                                  : CrossFadeState.showFirst,
                               duration: const Duration(milliseconds: 300),
                             ),
                           ],
@@ -873,7 +863,8 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                               'ოთახი',
                               apartment.geAppRoom,
                             ),
-                            if (apartment.geAppBedroom.isNotEmpty && apartment.geAppBedroom != 'არა')
+                            if (apartment.geAppBedroom.isNotEmpty &&
+                                apartment.geAppBedroom != 'არა')
                               _buildDetailRow(
                                 Icons.king_bed,
                                 'საძინებელი',
@@ -908,7 +899,8 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                                 apartment.terrace.split(' ').first,
                               ),
                             if (apartment.city == 'ბათუმი') ...[
-                              if (apartment.seaLine.isNotEmpty && apartment.seaLine != 'არა')
+                              if (apartment.seaLine.isNotEmpty &&
+                                  apartment.seaLine != 'არა')
                                 _buildDetailRow(
                                   Icons.waves,
                                   'ზოლი',
@@ -988,7 +980,7 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
                           ),
                         ),
                       ],
-                      const SizedBox(height: 80), // Extra space at the bottom
+                      const SizedBox(height: 80),
                     ],
                   ),
                 ),
@@ -1035,7 +1027,7 @@ class _ApartmentDetailsScreenState extends State<ApartmentDetailsScreen>
               ],
             ),
           ),
-          if (_showUndoWidget || _showSuccessMessage) _buildUndoWidget(),
+          // --- UNDO WIDGET REMOVED FROM STACK ---
         ],
       ),
     );
@@ -1180,27 +1172,43 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
 
     _currentImageUrls = List.from(widget.apartment.imageUrls);
     _selectedCity = widget.apartment.city;
-    _ownerNameController = TextEditingController(text: widget.apartment.ownerName);
-    _ownerNameRuController = TextEditingController(text: widget.apartment.ownerNameRu);
-    _ownerNumberController = TextEditingController(text: widget.apartment.ownerNumber);
-    _geAddressController = TextEditingController(text: widget.apartment.geAddress);
-    _ruAddressController = TextEditingController(text: widget.apartment.ruAddress);
-    _dailyPriceController = TextEditingController(text: widget.apartment.dailyPrice.toString());
-    _monthlyPriceController = TextEditingController(text: widget.apartment.monthlyPrice.toString());
-    _capacityController = TextEditingController(text: widget.apartment.peopleCapacity.toString());
-    _squareMetersController = TextEditingController(text: widget.apartment.squareMeters.toString());
-    _tagsController = TextEditingController(text: widget.apartment.tags.join(', '));
-    _descriptionController = TextEditingController(text: widget.apartment.description);
+    _ownerNameController =
+        TextEditingController(text: widget.apartment.ownerName);
+    _ownerNameRuController =
+        TextEditingController(text: widget.apartment.ownerNameRu);
+    _ownerNumberController =
+        TextEditingController(text: widget.apartment.ownerNumber);
+    _geAddressController =
+        TextEditingController(text: widget.apartment.geAddress);
+    _ruAddressController =
+        TextEditingController(text: widget.apartment.ruAddress);
+    _dailyPriceController =
+        TextEditingController(text: widget.apartment.dailyPrice.toString());
+    _monthlyPriceController =
+        TextEditingController(text: widget.apartment.monthlyPrice.toString());
+    _capacityController =
+        TextEditingController(text: widget.apartment.peopleCapacity.toString());
+    _squareMetersController =
+        TextEditingController(text: widget.apartment.squareMeters.toString());
+    _tagsController =
+        TextEditingController(text: widget.apartment.tags.join(', '));
+    _descriptionController =
+        TextEditingController(text: widget.apartment.description);
     _ownerIDController = TextEditingController(text: widget.apartment.ownerID);
     _ownerBDController = TextEditingController(text: widget.apartment.ownerBD);
-    _ownerBankController = TextEditingController(text: widget.apartment.ownerBank);
+    _ownerBankController =
+        TextEditingController(text: widget.apartment.ownerBank);
     _selectedBankName = widget.apartment.ownerBankName.isNotEmpty
         ? widget.apartment.ownerBankName
         : _bankOptions[0];
-    _districtRuController = TextEditingController(text: widget.apartment.districtRu);
-    _microDistrictRuController = TextEditingController(text: widget.apartment.microDistrictRu);
-    _districtController = TextEditingController(text: widget.apartment.district);
-    _microDistrictController = TextEditingController(text: widget.apartment.microDistrict);
+    _districtRuController =
+        TextEditingController(text: widget.apartment.districtRu);
+    _microDistrictRuController =
+        TextEditingController(text: widget.apartment.microDistrictRu);
+    _districtController =
+        TextEditingController(text: widget.apartment.district);
+    _microDistrictController =
+        TextEditingController(text: widget.apartment.microDistrict);
 
     _seaView = widget.apartment.seaView;
     _selectedSeaLine = widget.apartment.seaLine;
@@ -1218,18 +1226,20 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
 
     if (widget.apartment.ownerBD.isNotEmpty) {
       try {
-        _ownerBirthDate = DateFormat('dd/MMM/yyyy', 'ka_GE').parse(widget.apartment.ownerBD);
+        _ownerBirthDate =
+            DateFormat('dd/MMM/yyyy', 'ka_GE').parse(widget.apartment.ownerBD);
       } catch (e) {
         _ownerBirthDate = null;
       }
     }
 
-    if (_selectedRooms == 'სტუდიო' && !_bedroomOptions.contains(_selectedBedrooms)) {
+    if (_selectedRooms == 'სტუდიო' &&
+        !_bedroomOptions.contains(_selectedBedrooms)) {
       _selectedBedrooms = 'არა';
     }
 
-    // Setup Focus Listeners
-    void setupFocusListeners(FocusNode geNode, FocusNode ruNode, Function(bool) updateDominance) {
+    void setupFocusListeners(
+        FocusNode geNode, FocusNode ruNode, Function(bool) updateDominance) {
       geNode.addListener(() {
         if (geNode.hasFocus) setState(() => updateDominance(false));
       });
@@ -1238,14 +1248,39 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
       });
     }
 
-    setupFocusListeners(_geOwnerNameFocusNode, _ruOwnerNameFocusNode, (isRuDominant) => _isRuOwnerNameDominant = isRuDominant);
-    setupFocusListeners(_geAddressFocusNode, _ruAddressFocusNode, (isRuDominant) => _isRuAddressDominant = isRuDominant);
-    setupFocusListeners(_geDistrictFocusNode, _ruDistrictFocusNode, (isRuDominant) => _isRuDistrictDominant = isRuDominant);
-    setupFocusListeners(_geMicroDistrictFocusNode, _ruMicroDistrictFocusNode, (isRuDominant) => _isRuMicroDistrictDominant = isRuDominant);
+    setupFocusListeners(_geOwnerNameFocusNode, _ruOwnerNameFocusNode,
+            (isRuDominant) => _isRuOwnerNameDominant = isRuDominant);
+    setupFocusListeners(_geAddressFocusNode, _ruAddressFocusNode,
+            (isRuDominant) => _isRuAddressDominant = isRuDominant);
+    setupFocusListeners(_geDistrictFocusNode, _ruDistrictFocusNode,
+            (isRuDominant) => _isRuDistrictDominant = isRuDominant);
+    setupFocusListeners(_geMicroDistrictFocusNode, _ruMicroDistrictFocusNode,
+            (isRuDominant) => _isRuMicroDistrictDominant = isRuDominant);
 
+    _geAddressController.addListener(() {
+      final text = _geAddressController.text;
+      final prefix =
+      _selectedCity == 'ბათუმი' ? 'ქ. ბათუმი, ' : 'ქ. თბილისი, ';
+      if (!text.startsWith(prefix)) {
+        _geAddressController.text = prefix;
+        _geAddressController.selection = TextSelection.fromPosition(
+          TextPosition(offset: _geAddressController.text.length),
+        );
+      }
+    });
+
+    _ruAddressController.addListener(() {
+      final text = _ruAddressController.text;
+      final prefix =
+      _selectedCity == 'ბათუმი' ? 'г. Батуми, ' : 'г. Тбилиси, ';
+      if (!text.startsWith(prefix)) {
+        _ruAddressController.text = prefix;
+        _ruAddressController.selection = TextSelection.fromPosition(
+          TextPosition(offset: _ruAddressController.text.length),
+        );
+      }
+    });
   }
-
-
 
   @override
   void dispose() {
@@ -1278,7 +1313,6 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
     super.dispose();
   }
 
-
   void _updateAddressPrefix() {
     const gePrefixes = ['ქ. ბათუმი, ', 'ქ. თბილისი, '];
     const ruPrefixes = ['г. Батуми, ', 'г. Тбилиси, '];
@@ -1286,24 +1320,24 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
     String cleanGeAddress = _geAddressController.text;
     String cleanRuAddress = _ruAddressController.text;
 
-    // Strip any existing Georgian prefix
     for (var prefix in gePrefixes) {
       if (cleanGeAddress.startsWith(prefix)) {
         cleanGeAddress = cleanGeAddress.substring(prefix.length);
-        break; // Exit loop once prefix is found and removed
+        break;
       }
     }
 
-    // Strip any existing Russian prefix
     for (var prefix in ruPrefixes) {
       if (cleanRuAddress.startsWith(prefix)) {
         cleanRuAddress = cleanRuAddress.substring(prefix.length);
-        break; // Exit loop once prefix is found and removed
+        break;
       }
     }
 
-    String gePrefixToAdd = _selectedCity == 'ბათუმი' ? 'ქ. ბათუმი, ' : 'ქ. თბილისი, ';
-    String ruPrefixToAdd = _selectedCity == 'ბათუმი' ? 'г. Батуми, ' : 'г. Тбилиси, ';
+    String gePrefixToAdd =
+    _selectedCity == 'ბათუმი' ? 'ქ. ბათუმი, ' : 'ქ. თბილისი, ';
+    String ruPrefixToAdd =
+    _selectedCity == 'ბათუმი' ? 'г. Батуми, ' : 'г. Тбилиси, ';
 
     _geAddressController.text = gePrefixToAdd + cleanGeAddress;
     _ruAddressController.text = ruPrefixToAdd + cleanRuAddress;
@@ -1324,8 +1358,11 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error picking images: $e')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'სურათი ვერ აირჩა: $e',
+          isError: true,
         );
       }
     }
@@ -1333,8 +1370,11 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
 
   void _removeImage(int index, bool isExisting) {
     if ((_currentImageUrls.length + _newImages.length) <= 1) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('At least one image is required')),
+      // --- MODIFIED ---
+      CustomSnackBar.show(
+        context: context,
+        message: 'საჭიროებს 1 სურათი მაინც',
+        isError: true,
       );
       return;
     }
@@ -1387,10 +1427,13 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
   }
 
   Future<void> _saveChanges() async {
+
     if (!_formKey.currentState!.validate() || _isSaving) return;
     if (_currentImageUrls.isEmpty && _newImages.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please add at least one image')),
+      CustomSnackBar.show(
+        context: context,
+        message: 'გთხოვთ დაამატოთ 1 სურათი მაინც',
+        isError: true,
       );
       return;
     }
@@ -1401,19 +1444,48 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
     });
 
     try {
+      final firestoreService = Provider.of<FirestoreService>(context, listen: false);
+      // Use the *original* apartment's address to check for the document's existence.
+      final originalDocId = widget.apartment.geAddress.replaceAll(RegExp(r'[\/]'), '-');
+      final doc = await firestoreService.db.collection('apartments').doc(originalDocId).get();
+
+      if (!doc.exists) {
+        if (mounted) {
+          CustomSnackBar.show(
+            context: context,
+            message: 'ეს ბინა წაიშალა სხვა ადგილიდან',
+            isError: true,
+          );
+          // Exit the edit screen since the apartment is gone.
+          Navigator.of(context).pop(null);
+        }
+        return; // Abort the save.
+      }
+    } catch(e) {
+      if (mounted) {
+        CustomSnackBar.show(
+          context: context,
+          message: 'ვერ მოხერხდა ბინის სტატუსის ვერიფიცირება: ${e.toString()}',
+          isError: true,
+        );
+      }
+      setState(() => _isSaving = false);
+      return;
+    }
+
+    try {
       final String newAddress = _geAddressController.text.trim();
       final String oldAddress = widget.apartment.geAddress;
       final bool addressChanged = newAddress != oldAddress;
-      final String cleanOldAddress = oldAddress.replaceAll(RegExp(r'[\/]'), '-');
-      final String cleanNewAddress = newAddress.replaceAll(RegExp(r'[\/]'), '-');
+      final String cleanOldAddress =
+      oldAddress.replaceAll(RegExp(r'[\/]'), '-');
+      final String cleanNewAddress =
+      newAddress.replaceAll(RegExp(r'[\/]'), '-');
 
       List<String> finalImageUrls = [];
       if (addressChanged && _currentImageUrls.isNotEmpty) {
         finalImageUrls = await _copyImagesToNewAddress(
-            _currentImageUrls,
-            cleanOldAddress,
-            cleanNewAddress
-        );
+            _currentImageUrls, cleanOldAddress, cleanNewAddress);
         _imagesToDelete.addAll(_currentImageUrls);
       } else {
         finalImageUrls = List.from(_currentImageUrls);
@@ -1466,10 +1538,17 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
         microDistrictRu: _microDistrictRuController.text.trim(),
       );
 
+      // --- THIS IS THE CRUCIAL FIX ---
+      // 1. Calculate the new Document ID based on the potentially new address.
+      final newDocId = updatedApartment.geAddress.replaceAll(RegExp(r'[\/]'), '-');
+      // 2. Create a final, definitive apartment object with the correct ID.
+      final finalApartment = updatedApartment.copyWith(id: newDocId);
+      // --- END OF FIX ---
+
       await Provider.of<FirestoreService>(context, listen: false)
           .updateApartmentWithOwnerHandling(
         originalApartment: widget.apartment,
-        updatedApartment: updatedApartment,
+        updatedApartment: finalApartment,
       );
 
       if (addressChanged) {
@@ -1477,15 +1556,19 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Apartment updated successfully!')),
+        CustomSnackBar.show(
+          context: context,
+          message: 'ბინა წარმატებით განახლდა!',
         );
-        Navigator.of(context).pop(updatedApartment);
+        Navigator.of(context).pop(finalApartment); // <-- Return the object with the correct ID
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Update failed: ${e.toString()}')),
+        // --- MODIFIED ---
+        CustomSnackBar.show(
+          context: context,
+          message: 'წარუმატებელი განახლება: ${e.toString()}',
+          isError: true,
         );
       }
     } finally {
@@ -1534,16 +1617,13 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
 
   Future<void> _tryDeleteOldFolder(String oldAddress) async {
     try {
-      final folderRef = FirebaseStorage.instance
-          .ref()
-          .child('Apartments')
-          .child(oldAddress);
+      final folderRef =
+      FirebaseStorage.instance.ref().child('Apartments').child(oldAddress);
 
       final listResult = await folderRef.listAll();
 
       if (listResult.items.isEmpty && listResult.prefixes.isEmpty) {
         // This part is problematic as Firebase Storage doesn't support direct folder deletion.
-        // This is a best-effort attempt. For full cleanup, a cloud function is better.
       }
     } catch (e) {
       debugPrint('Error during old folder cleanup check: $e');
@@ -1592,7 +1672,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                   margin: const EdgeInsets.only(right: 8),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.grey.shade300, width: 1.5),
+                    border:
+                    Border.all(color: Colors.grey.shade300, width: 1.5),
                   ),
                   child: const Center(child: CircularProgressIndicator()),
                 );
@@ -1614,9 +1695,11 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                         future: item.file!.readAsBytes(),
                         builder: (context, snapshot) {
                           if (snapshot.hasData) {
-                            return Image.memory(snapshot.data!, fit: BoxFit.cover);
+                            return Image.memory(snapshot.data!,
+                                fit: BoxFit.cover);
                           }
-                          return const Center(child: CircularProgressIndicator());
+                          return const Center(
+                              child: CircularProgressIndicator());
                         },
                       )
                           : Image.network(item.url!, fit: BoxFit.cover),
@@ -1635,7 +1718,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                             shape: BoxShape.circle,
                           ),
                           padding: const EdgeInsets.all(4),
-                          child: const Icon(Icons.close, color: Colors.white, size: 16),
+                          child: const Icon(Icons.close,
+                              color: Colors.white, size: 16),
                         ),
                       ),
                     ),
@@ -1655,8 +1739,10 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
             style: ElevatedButton.styleFrom(
               backgroundColor: primaryColor,
               foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              padding:
+              const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
             ),
           ),
         ),
@@ -1664,14 +1750,13 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
     );
   }
 
-  // --- Reusable Widget Builders ---
-
   Widget _buildSectionHeader(String text) {
     return Padding(
       padding: const EdgeInsets.only(top: 8.0, bottom: 12.0),
       child: Text(
         text,
-        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.black),
+        style: const TextStyle(
+            fontSize: 18, fontWeight: FontWeight.w600, color: Colors.black),
       ),
     );
   }
@@ -1754,7 +1839,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
       decoration: InputDecoration(
         labelText: labelText,
         hintText: hintText,
-        labelStyle: TextStyle(color: primaryColor, fontSize: 14, fontWeight: FontWeight.w500),
+        labelStyle: TextStyle(
+            color: primaryColor, fontSize: 14, fontWeight: FontWeight.w500),
         border: OutlineInputBorder(
           borderSide: BorderSide(color: Colors.grey.shade300),
           borderRadius: BorderRadius.circular(8),
@@ -1775,7 +1861,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
           borderRadius: BorderRadius.circular(8),
           borderSide: const BorderSide(color: Colors.red, width: 1.5),
         ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        contentPadding:
+        const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         filled: true,
         fillColor: Colors.grey.shade50,
       ),
@@ -1795,7 +1882,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
       onChanged: onChanged,
       decoration: InputDecoration(
         labelText: label,
-        labelStyle: TextStyle(color: primaryColor, fontSize: 14, fontWeight: FontWeight.w500),
+        labelStyle: TextStyle(
+            color: primaryColor, fontSize: 14, fontWeight: FontWeight.w500),
         border: OutlineInputBorder(
           borderSide: BorderSide(color: Colors.grey.shade300),
           borderRadius: BorderRadius.circular(8),
@@ -1808,7 +1896,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
           borderSide: BorderSide(color: primaryColor, width: 1.5),
           borderRadius: BorderRadius.circular(8),
         ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        contentPadding:
+        const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         filled: true,
         fillColor: Colors.grey.shade50,
       ),
@@ -1840,7 +1929,10 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
           child: Center(
             child: Text(
               label,
-              style: TextStyle(color: isActive ? Colors.white : Colors.black87, fontWeight: FontWeight.w500, fontSize: 14),
+              style: TextStyle(
+                  color: isActive ? Colors.white : Colors.black87,
+                  fontWeight: FontWeight.w500,
+                  fontSize: 14),
             ),
           ),
         ),
@@ -1882,7 +1974,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
       child: InputDecorator(
         decoration: InputDecoration(
           labelText: label,
-          labelStyle: TextStyle(color: primaryColor, fontSize: 14, fontWeight: FontWeight.w500),
+          labelStyle: TextStyle(
+              color: primaryColor, fontSize: 14, fontWeight: FontWeight.w500),
           border: OutlineInputBorder(
             borderSide: BorderSide(color: Colors.grey.shade300),
             borderRadius: BorderRadius.circular(8),
@@ -1891,10 +1984,12 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
             borderSide: BorderSide(color: Colors.grey.shade300),
             borderRadius: BorderRadius.circular(8),
           ),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          contentPadding:
+          const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           filled: true,
           fillColor: Colors.grey.shade50,
-          suffixIcon: Icon(Icons.calendar_today, color: primaryColor, size: 20),
+          suffixIcon:
+          Icon(Icons.calendar_today, color: primaryColor, size: 20),
         ),
         child: Text(
           selectedDate != null
@@ -1902,7 +1997,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
               : 'აირჩიეთ თარიღი',
           style: TextStyle(
             fontSize: 14,
-            color: selectedDate == null ? Colors.grey.shade600 : Colors.black87,
+            color:
+            selectedDate == null ? Colors.grey.shade600 : Colors.black87,
           ),
         ),
       ),
@@ -1933,9 +2029,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                   width: 2,
                 ),
               ),
-              child: value
-                  ? const Icon(Icons.check, size: 16, color: Colors.white)
-                  : null,
+              child:
+              value ? const Icon(Icons.check, size: 16, color: Colors.white) : null,
             ),
             const SizedBox(width: 8),
             Text(title, style: const TextStyle(fontSize: 14)),
@@ -1944,7 +2039,6 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
       ),
     );
   }
-
 
   @override
   Widget build(BuildContext context) {
@@ -1960,13 +2054,26 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
         foregroundColor: Colors.white,
         actions: [
           IconButton(
-            icon: _isSaving ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) : const Icon(Icons.save),
+            icon: _isSaving
+                ? const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                    color: Colors.white, strokeWidth: 2))
+                : const Icon(Icons.save),
             onPressed: _isSaving ? null : _saveChanges,
           ),
         ],
       ),
       body: _isSaving
-          ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [CircularProgressIndicator(color: primaryColor), const SizedBox(height: 16), const Text("Saving changes...")],))
+          ? Center(
+          child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                CircularProgressIndicator(color: primaryColor),
+                const SizedBox(height: 16),
+                const Text("შენახვა...")
+              ]))
           : Padding(
         padding: const EdgeInsets.all(16.0),
         child: Form(
@@ -1987,8 +2094,7 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                       return 'გთხოვთ შეიყვანოთ მეპატრონის სახელი';
                     }
                     return null;
-                  }
-              ),
+                  }),
               const SizedBox(height: 16),
               _buildModernTextField(
                 controller: _ownerNumberController,
@@ -2013,14 +2119,18 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                 onDateSelected: (date) {
                   setState(() {
                     _ownerBirthDate = date;
-                    _ownerBDController.text = DateFormat('dd/MMM/yyyy', 'ka_GE').format(date);
+                    _ownerBDController.text =
+                        DateFormat('dd/MMM/yyyy', 'ka_GE').format(date);
                   });
                 },
               ),
               const SizedBox(height: 16),
               _buildModernDropdown<String>(
                 label: 'ბანკი',
-                items: _bankOptions.map((option) => DropdownMenuItem(value: option, child: Text(option))).toList(),
+                items: _bankOptions
+                    .map((option) =>
+                    DropdownMenuItem(value: option, child: Text(option)))
+                    .toList(),
                 value: _selectedBankName,
                 onChanged: (value) {
                   setState(() {
@@ -2094,7 +2204,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                   ruFocusNode: _ruDistrictFocusNode,
                   isRuDominant: _isRuDistrictDominant,
                   validator: (value) {
-                    if (_selectedCity == 'თბილისი' && (value == null || value.isEmpty)) {
+                    if (_selectedCity == 'თბილისი' &&
+                        (value == null || value.isEmpty)) {
                       return 'გთხოვთ შეიყვანოთ რაიონი';
                     }
                     return null;
@@ -2118,16 +2229,21 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
               if (_selectedCity == 'ბათუმი') ...[
                 _buildModernDropdown<String>(
                   label: 'ზღვის ზოლი',
-                  items: _seaLineOptions.map((option) => DropdownMenuItem(value: option, child: Text(option))).toList(),
+                  items: _seaLineOptions
+                      .map((option) => DropdownMenuItem(
+                      value: option, child: Text(option)))
+                      .toList(),
                   value: _selectedSeaLine,
-                  onChanged: (value) => setState(() => _selectedSeaLine = value ?? _seaLineOptions[0]),
+                  onChanged: (value) => setState(
+                          () => _selectedSeaLine = value ?? _seaLineOptions[0]),
                 ),
                 const SizedBox(height: 16),
                 _buildModernDropdown<String>(
                   label: 'ზღვის ხედი',
                   value: _seaView,
                   items: ['კი', 'არა'].map((String value) {
-                    return DropdownMenuItem<String>(value: value, child: Text(value));
+                    return DropdownMenuItem<String>(
+                        value: value, child: Text(value));
                   }).toList(),
                   onChanged: (newValue) {
                     setState(() {
@@ -2139,7 +2255,10 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
               ],
               _buildModernDropdown<String>(
                 label: 'ოთახი',
-                items: _roomOptions.map((option) => DropdownMenuItem(value: option, child: Text(option))).toList(),
+                items: _roomOptions
+                    .map((option) =>
+                    DropdownMenuItem(value: option, child: Text(option)))
+                    .toList(),
                 value: _selectedRooms,
                 onChanged: (value) {
                   setState(() {
@@ -2153,32 +2272,48 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
               const SizedBox(height: 16),
               _buildModernDropdown<String>(
                 label: 'საძინებელი',
-                items: _bedroomOptions.map((option) => DropdownMenuItem(value: option, child: Text(option))).toList(),
+                items: _bedroomOptions
+                    .map((option) =>
+                    DropdownMenuItem(value: option, child: Text(option)))
+                    .toList(),
                 value: _selectedBedrooms,
                 onChanged: _selectedRooms == 'სტუდიო'
                     ? null
-                    : (value) => setState(() => _selectedBedrooms = value ?? '1-საძინებლიანი'),
+                    : (value) => setState(
+                        () => _selectedBedrooms = value ?? '1-საძინებლიანი'),
               ),
               const SizedBox(height: 16),
               _buildModernDropdown<String>(
                 label: 'სველი წერტილი',
-                items: _bathroomOptions.map((option) => DropdownMenuItem(value: option, child: Text(option))).toList(),
+                items: _bathroomOptions
+                    .map((option) =>
+                    DropdownMenuItem(value: option, child: Text(option)))
+                    .toList(),
                 value: _selectedBathroom,
-                onChanged: (value) => setState(() => _selectedBathroom = value ?? _bathroomOptions[0]),
+                onChanged: (value) => setState(
+                        () => _selectedBathroom = value ?? _bathroomOptions[0]),
               ),
               const SizedBox(height: 16),
               _buildModernDropdown<String>(
                 label: 'აივანი',
-                items: _balconyOptions.map((option) => DropdownMenuItem(value: option, child: Text(option))).toList(),
+                items: _balconyOptions
+                    .map((option) =>
+                    DropdownMenuItem(value: option, child: Text(option)))
+                    .toList(),
                 value: _selectedBalcony,
-                onChanged: (value) => setState(() => _selectedBalcony = value ?? _balconyOptions[0]),
+                onChanged: (value) => setState(
+                        () => _selectedBalcony = value ?? _balconyOptions[0]),
               ),
               const SizedBox(height: 16),
               _buildModernDropdown<String>(
                 label: 'ტერასა',
-                items: _terraceOptions.map((option) => DropdownMenuItem(value: option, child: Text(option))).toList(),
+                items: _terraceOptions
+                    .map((option) =>
+                    DropdownMenuItem(value: option, child: Text(option)))
+                    .toList(),
                 value: _selectedTerrace,
-                onChanged: (value) => setState(() => _selectedTerrace = value ?? _terraceOptions[0]),
+                onChanged: (value) => setState(
+                        () => _selectedTerrace = value ?? _terraceOptions[0]),
               ),
               const SizedBox(height: 16),
               _buildModernTextField(
@@ -2186,8 +2321,10 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                 labelText: 'კვადრატული მეტრი',
                 keyboardType: TextInputType.number,
                 validator: (value) {
-                  if (value == null || value.isEmpty) return 'გთხოვთ შეიყვანოთ კვადრატული მეტრი';
-                  if (double.tryParse(value) == null) return 'გთხოვთ შეიყვანოთ კორექტული რიცხვი';
+                  if (value == null || value.isEmpty)
+                    return 'გთხოვთ შეიყვანოთ კვადრატული მეტრი';
+                  if (double.tryParse(value) == null)
+                    return 'გთხოვთ შეიყვანოთ კორექტული რიცხვი';
                   return null;
                 },
               ),
@@ -2197,8 +2334,10 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                 labelText: 'მაქს. სტუმრების რაოდენობა',
                 keyboardType: TextInputType.number,
                 validator: (value) {
-                  if (value == null || value.isEmpty) return 'გთხოვთ შეიყვანოთ მაქს. სტუმრების რაოდენობა';
-                  if (int.tryParse(value) == null) return 'გთხოვთ შეიყვანოთ კორექტული რიცხვი';
+                  if (value == null || value.isEmpty)
+                    return 'გთხოვთ შეიყვანოთ მაქს. სტუმრების რაოდენობა';
+                  if (int.tryParse(value) == null)
+                    return 'გთხოვთ შეიყვანოთ კორექტული რიცხვი';
                   return null;
                 },
               ),
@@ -2209,14 +2348,16 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                     child: _buildCircularCheckbox(
                       title: 'კონდიციონერი',
                       value: _hasAC,
-                      onChanged: (value) => setState(() => _hasAC = value ?? false),
+                      onChanged: (value) =>
+                          setState(() => _hasAC = value ?? false),
                     ),
                   ),
                   Expanded(
                     child: _buildCircularCheckbox(
                       title: 'ლიფტი',
                       value: _hasElevator,
-                      onChanged: (value) => setState(() => _hasElevator = value ?? false),
+                      onChanged: (value) =>
+                          setState(() => _hasElevator = value ?? false),
                     ),
                   ),
                 ],
@@ -2227,7 +2368,8 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
                     child: _buildCircularCheckbox(
                       title: 'ცხელი წყალი',
                       value: _warmWater,
-                      onChanged: (value) => setState(() => _warmWater = value ?? false),
+                      onChanged: (value) =>
+                          setState(() => _warmWater = value ?? false),
                     ),
                   ),
                   Expanded(
@@ -2249,22 +2391,26 @@ class _EditApartmentScreenState extends State<EditApartmentScreen> {
               _buildSectionHeader('ფასი'),
               _buildModernTextField(
                 controller: _dailyPriceController,
-                labelText: 'დღიური ფასი (GEL)*',
+                labelText: 'დღიური ფასი (₾)',
                 keyboardType: TextInputType.number,
                 validator: (value) {
-                  if (value == null || value.isEmpty) return 'გთხოვთ შეიყვანოთ დღიური ფასი';
-                  if (double.tryParse(value) == null) return 'გთხოვთ შეიყვანოთ კორექტული რიცხვი';
+                  if (value == null || value.isEmpty)
+                    return 'გთხოვთ შეიყვანოთ დღიური ფასი';
+                  if (double.tryParse(value) == null)
+                    return 'გთხოვთ შეიყვანოთ კორექტული რიცხვი';
                   return null;
                 },
               ),
               const SizedBox(height: 16),
               _buildModernTextField(
                 controller: _monthlyPriceController,
-                labelText: 'თვიური ფასი (USD)*',
+                labelText: 'თვიური ფასი (\$)',
                 keyboardType: TextInputType.number,
                 validator: (value) {
-                  if (value == null || value.isEmpty) return 'გთხოვთ შეიყვანოთ თვიური ფასი';
-                  if (double.tryParse(value) == null) return 'გთხოვთ შეიყვანოთ კორექტული რიცხვი';
+                  if (value == null || value.isEmpty)
+                    return 'გთხოვთ შეიყვანოთ თვიური ფასი';
+                  if (double.tryParse(value) == null)
+                    return 'გთხოვთ შეიყვანოთ კორექტული რიცხვი';
                   return null;
                 },
               ),

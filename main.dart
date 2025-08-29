@@ -86,20 +86,14 @@ class MyApp extends StatelessWidget {
     const Color primaryBlue = Color(0xFF004aad);
 
     return MaterialApp(
-      title: 'SophiaHome',
+      title: 'Sofia Estates',
 
-      // --- ADD THIS THEME DATA ---
+      // --- MODIFY THIS THEME DATA ---
       theme: ThemeData(
         primaryColor: primaryBlue,
         colorScheme: ColorScheme.fromSeed(seedColor: primaryBlue),
-        textSelectionTheme: const TextSelectionThemeData(
-          // This sets the blinking cursor color
-          cursorColor: primaryBlue,
-          // By removing selectionColor and selectionHandleColor,
-          // Flutter will use the default system colors for these properties.
-        ),
       ),
-      // -----------------------------
+
 
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,

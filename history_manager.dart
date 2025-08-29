@@ -6,7 +6,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'dart:typed_data';
-import 'package:realtor_app/contract_form_screen.dart';
 
 class DocumentHistoryItem {
   final String id;
@@ -25,11 +24,7 @@ class DocumentHistoryItem {
     this.textFileUrl,
     required this.timestamp,
     required this.placeholders,
-  }) : assert(
-  (generatedText != null && pdfUrl == null && textFileUrl == null) ||
-      (generatedText == null && pdfUrl != null && textFileUrl != null),
-  'DocumentHistoryItem must have either generatedText or both pdfUrl and textFileUrl',
-  );
+  });
 
   Map<String, dynamic> toFirestore() {
     return {
@@ -79,11 +74,9 @@ class DocumentHistoryManager {
     return user?.uid;
   }
 
-// lib/history_manager.dart
-
   static Future<Map<String, String>?> uploadContractFiles({
     required Uint8List pdfBytes,
-    required String textContent,
+    required String textContent, // textContent is no longer used but kept for signature consistency
     required String geNameGive,
     required String geNameTake,
   }) async {
@@ -97,24 +90,14 @@ class DocumentHistoryManager {
     try {
       // Upload PDF
       final pdfPath = '$basePath/contract.pdf';
-
-      // --- THIS IS THE CORRECTED LINE ---
-      // Use putData(pdfBytes) instead of the old putFile(pdfFile)
       final pdfUploadTask = _storage.ref().child(pdfPath).putData(pdfBytes);
-
       final pdfSnapshot = await pdfUploadTask;
       final pdfUrl = await pdfSnapshot.ref.getDownloadURL();
 
-      // Upload TXT
-      final txtPath = '$basePath/values.txt';
-      final txtData = Uint8List.fromList(utf8.encode(textContent));
-      final txtUploadTask = _storage.ref().child(txtPath).putData(txtData);
-      final txtSnapshot = await txtUploadTask;
-      final txtUrl = await txtSnapshot.ref.getDownloadURL();
+      // --- The TXT file upload has been removed. ---
 
       return {
         'pdfUrl': pdfUrl,
-        'textFileUrl': txtUrl,
         'storagePath': basePath,
       };
     } catch (e) {
@@ -172,8 +155,13 @@ class DocumentHistoryManager {
       documentName = '$address - $timestamp';
     } else if (item.type == 'Contract') {
       collectionPath = 'contracts_history';
-      final geNameGive = item.placeholders['geNameGive'];
-      final geNameTake = item.placeholders['geNameTake'];
+
+      // --- THIS IS THE FIX ---
+      // The keys are updated to match what is being saved in contract_form_screen.dart
+      final geNameGive = (item.placeholders['ownerNameGe'] as String? ?? 'UnknownOwner').replaceAll('/', '_');
+      final geNameTake = (item.placeholders['guestNameGe'] as String? ?? 'UnknownGuest').replaceAll('/', '_');
+      // --- END OF FIX ---
+
       documentName = '$geNameGive - $geNameTake - $timestamp';
     } else {
       print("Error: Unknown document type.");
@@ -191,6 +179,7 @@ class DocumentHistoryManager {
     }
   }
 
+  // THIS IS THE EXISTING METHOD that returns a Future
   static Future<List<DocumentHistoryItem>> getHistory(String type) async {
     String? uid = await _getCurrentUserUid();
     if (uid == null) return [];
@@ -211,6 +200,88 @@ class DocumentHistoryManager {
     } catch (e) {
       print("Error getting history: $e");
       return [];
+    }
+  }
+
+  // --- ADD THIS NEW METHOD to provide a real-time stream ---
+  static Stream<List<DocumentHistoryItem>> getHistoryStream(String type) {
+    String? uid = _auth.currentUser?.uid;
+    if (uid == null) {
+      // Return an empty stream if the user is somehow not logged in
+      return Stream.value([]);
+    }
+
+    String collectionPath = type == 'Invoice'
+        ? 'invoices_history'
+        : 'contracts_history';
+
+    try {
+      return _db
+          .collection('generated')
+          .doc('contracts and invoices')
+          .collection(collectionPath)
+          .orderBy('createdAt', descending: true)
+          .snapshots() // Use snapshots() instead of get() for real-time updates
+          .map((snapshot) => snapshot.docs
+          .map((doc) => DocumentHistoryItem.fromFirestore(doc))
+          .toList());
+    } catch (e) {
+      print("Error getting history stream: $e");
+      return Stream.value([]);
+    }
+  }
+
+  /// Deletes a single history item and its associated files from Firebase.
+  static Future<void> deleteHistoryItem(String id, String type) async {
+    String? uid = await _getCurrentUserUid();
+    if (uid == null) return;
+
+    String collectionPath = type == 'Invoice'
+        ? 'invoices_history'
+        : 'contracts_history';
+
+    try {
+      // Get the reference to the document to be deleted
+      DocumentReference docRef = _db
+          .collection('generated')
+          .doc('contracts and invoices')
+          .collection(collectionPath)
+          .doc(id);
+
+      // Get the document to access its data before deleting
+      DocumentSnapshot docSnapshot = await docRef.get();
+      if (!docSnapshot.exists) {
+        print("Error: Document with ID $id not found.");
+        return;
+      }
+
+      Map<String, dynamic> data = docSnapshot.data() as Map<String, dynamic>;
+
+      // Concurrently delete associated files from Firebase Storage
+      List<Future<void>> deleteFutures = [];
+      if (data['pdfUrl'] != null) {
+        try {
+          deleteFutures.add(_storage.refFromURL(data['pdfUrl']).delete());
+        } catch (e) {
+          print("Error deleting PDF file: $e");
+        }
+      }
+
+      if (data['textFileUrl'] != null) {
+        try {
+          deleteFutures.add(_storage.refFromURL(data['textFileUrl']).delete());
+        } catch (e) {
+          print("Error deleting text file: $e");
+        }
+      }
+
+      await Future.wait(deleteFutures);
+
+      // Finally, delete the Firestore document
+      await docRef.delete();
+    } catch (e) {
+      print("Error deleting history item: $e");
+      throw Exception('Failed to delete history item.');
     }
   }
 

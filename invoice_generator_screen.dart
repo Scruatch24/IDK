@@ -1,4 +1,3 @@
-// lib/invoice_generator_screen.dart
 import 'package:realtor_app/history_screen.dart';
 import 'package:realtor_app/history_manager.dart';
 import 'package:flutter/material.dart';
@@ -7,6 +6,7 @@ import 'package:intl/intl.dart';
 import 'package:realtor_app/data/app_data.dart'; // Import your app_data.dart
 import 'package:dropdown_search/dropdown_search.dart';
 import 'dart:ui';
+import 'dart:async';
 
 
 class CopySuccessPopup extends StatelessWidget {
@@ -94,7 +94,8 @@ const TextStyle inputLabelStyle = TextStyle(
 class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
   // --- State Variables and Controllers ---
 
-
+  StreamSubscription? _ownersSubscription;
+  StreamSubscription? _apartmentsSubscription;
 
 // Replace the existing _showVerificationPopup method with this one.
 
@@ -169,6 +170,7 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
   List<Apartment> _availableApartmentsForOwner = [];
   String _addOwnerManually = 'არა'; // 'კი' or 'არა'
   final TextEditingController _manualOwnerNameController = TextEditingController();
+  final TextEditingController _manualOwnerNameRuController = TextEditingController();
 
 // Add these with other controllers
   final TextEditingController _districtRuController = TextEditingController();
@@ -213,6 +215,9 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
   String _guidePerson = 'მაკო ნაკაიძე'; // Default
   String _guidePhoneNum = '+995 599 238 685'; // Default phone for Maia Nakaidze
 
+  final TextEditingController _customGuideNameController = TextEditingController();
+  final TextEditingController _customGuidePhoneController = TextEditingController();
+
   // Pets
   String _pets = 'არა'; // Default
 
@@ -245,6 +250,11 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
   final FocusNode _geNameTakeFocusNode = FocusNode();
   final FocusNode _ruNameTakeFocusNode = FocusNode();
   bool _isRuNameTakeDominant = false;
+
+  // ADD THESE THREE LINES
+  final FocusNode _geOwnerNameFocusNode = FocusNode();
+  final FocusNode _ruOwnerNameFocusNode = FocusNode();
+  bool _isRuOwnerNameDominant = false;
 
   final FirestoreService _firestoreService = FirestoreService(); // Instance of FirestoreService
 
@@ -325,13 +335,13 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
     'მაკო ნაკაიძე': '+995 599 238 685',
     'მზია გოგიტიძე': '+995 555 620 358',
     'სალო ხელაძე': '+995 555 356 069',
-    'არავინ': '', // Add "No one" option with an empty phone number
+    'სხვა': '', // Add "No one" option with an empty phone number
   };
   final Map<String, String> _guidePersonRuNames = {
     'მაკო ნაკაიძე': 'Мако Накаидзе',
     'მზია გოგიტიძე': 'Мзия Гогитидзе',
     'სალო ხელაძე': 'Саломе Хеладзе',
-    'არავინ': '', // Add "No one" option with an empty Russian name
+    'სხვა': '', // Add "No one" option with an empty Russian name
   };
 
   final Map<String, String> _petsOptions = {
@@ -346,6 +356,10 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
 
 
 
+
+// lib/invoice_generator_screen.dart
+
+// ... inside _InvoiceGeneratorScreenState class
 
   @override
   void initState() {
@@ -373,8 +387,6 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
       }
     });
 
-    _geAddressController.text = 'ქ. ბათუმი, ';
-    _ruAddressController.text = 'г. Батуми, ';
     if (widget.showVerificationPopup) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _showVerificationPopup(context, 'გადაამოწმეთ ინვოისი');
@@ -384,23 +396,128 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
     // Initialize with prefilled data if available
     if (widget.prefilledData != null) {
       final data = widget.prefilledData!;
-      _selectedApartment = data['apartment'] as Apartment?;
-      _startDate = data['startDate'] as DateTime?;
-      _endDate = data['endDate'] as DateTime?;
-      _invoiceTypeSelection = data['invoiceType'] as String? ?? 'Daily';
-      _invoiceRecipient = data['recipient'] as String? ?? 'კლიენტი';
 
-      if (_selectedApartment != null) {
-        _onApartmentSelected(_selectedApartment);
-        _priceController.text = data['bookingPrice']?.toStringAsFixed(2) ??
-            (_invoiceTypeSelection == 'Daily'
-                ? _selectedApartment!.dailyPrice.toStringAsFixed(2)
-                : _selectedApartment!.monthlyPrice.toStringAsFixed(2));
-      }
+      // --- NEW: Check if data is from history refill ---
+      if (data.containsKey('Invoice Type')) {
+        // Invoice Type and Currency
+        _invoiceTypeSelection = data['Invoice Type'] as String? ?? 'Daily';
+        if (_invoiceTypeSelection == 'Monthly') {
+          _invoiceType = "თვე";
+          _invoiceType2 = "ყოველთვიური";
+        } else {
+          _invoiceType = "ღამე";
+          _invoiceType2 = "ღამის";
+        }
+        _sellingCurrency = data['Selling Currency'] as String? ?? 'ქართული ლარი';
 
-      if (_startDate != null && _endDate != null) {
-        _calculateDatesRange();
+        // Address and City
+        final geAddress = data['Apartment Address (GE)'] as String? ?? 'ქ. ბათუმი, ';
+        _geAddressController.text = geAddress;
+        _ruAddressController.text = data['Apartment Address (RU)'] as String? ?? 'г. Батуми, ';
+        _selectedCity = geAddress.startsWith('ქ. ბათუმი') ? 'ბათუმი' : 'თბილისი';
+
+        _districtController.text = data['District'] as String? ?? '';
+        _microDistrictController.text = data['Microdistrict'] as String? ?? '';
+        _districtRuController.text = data['districtRu'] as String? ?? '';
+        _microDistrictRuController.text = data['microDistrictRu'] as String? ?? '';
+
+        // Apartment Details
+        _seaView = data['Sea View'] as String? ?? 'არა';
+        _seaLine = data['Sea Line'] as String? ?? 'არა';
+        _geAppRoom = data['Apartment Room (GE)'] as String? ?? '3-ოთახიანი';
+        _ruAppRoom = _geAppRoomOptions[_geAppRoom] ?? '3-комнатная';
+        _geAppBedroom = data['Apartment Bedroom (GE)'] as String? ?? '1-საძინებლიანი';
+        _ruAppBedroom = _geAppBedroomOptions[_geAppBedroom] ?? '1 спальня';
+        _balcony = data['Balcony'] as String? ?? '1 აივანი';
+        _terrace = data['Terrace'] as String? ?? 'ტერასის გარეშე';
+
+        // Dates
+        final startDateString = data['Start Date'] as String?;
+        if (startDateString != null) _startDate = DateTime.tryParse(startDateString);
+        final endDateString = data['End Date'] as String?;
+        if (endDateString != null) _endDate = DateTime.tryParse(endDateString);
+        _startNegotiated = data['Start Negotiated'] as String? ?? 'არა';
+
+        // Price
+        _priceController.text = data['Price'] as String? ?? '';
+        _prePayedController.text = data['Pre-payed'] as String? ?? '';
+
+        // Guide Person
+        final guideName = data['Guide Person (GE)'] as String?;
+        if (guideName != null && _guidePersonOptions.containsKey(guideName)) {
+          _guidePerson = guideName;
+          _guidePhoneNum = _guidePersonOptions[guideName]!;
+        } else if (guideName != null) {
+          _guidePerson = 'სხვა';
+          _customGuideNameController.text = guideName;
+          _customGuidePhoneController.text = data['Guide Phone Num'] as String? ?? '';
+        }
+
+        // Guest Info
+        _geNameTakeController.text = data['Guest Name (GE)'] as String? ?? '';
+        _ruNameTakeController.text = data['Guest Name (RU)'] as String? ?? '';
+        _takePhoneNumController.text = data['Guest Phone Num'] as String? ?? '';
+        _adultsController.text = data['Adults'] as String? ?? '';
+        _childrenController.text = data['Children'] as String? ?? '';
+        _pets = data['Pets'] as String? ?? 'არა';
+
+        // Owner Info & Recipient
+        _addOwnerManually = data['Manual Owner Input Enabled'] as String? ?? 'არა';
+        _manualOwnerNameController.text = data['Manual Owner Name'] as String? ?? '';
+        _manualOwnerNameRuController.text = data['Manual Owner Name (RU)'] as String? ?? '';
+
+        // Infer recipient based on filled data
+        if (_geNameTakeController.text.isNotEmpty || _addOwnerManually == 'არა') {
+          _invoiceRecipient = 'კლიენტი';
+        } else {
+          _invoiceRecipient = 'მეპატრონე';
+        }
+
+        // Recalculate derived values
+        _calculateDatesRange(); // This also calls _updateCalculatedPrices()
+      } else {
+        // --- EXISTING LOGIC to prefill from somewhere else (e.g., booking) ---
+        _selectedApartment = data['apartment'] as Apartment?;
+        _startDate = data['startDate'] as DateTime?;
+        _endDate = data['endDate'] as DateTime?;
+
+        _invoiceRecipient = data['recipient'] as String? ?? 'კლიენტი';
+        _geNameTakeController.text = data['guestName'] as String? ?? '';
+        _prePayedController.text = data['prepayment'] as String? ?? '';
+        _manualOwnerNameController.text = data['ownerName'] as String? ?? '';
+
+        _invoiceTypeSelection = data['invoiceType'] as String? ?? 'Daily';
+        _sellingCurrency = data['currency'] as String? ?? 'ქართული ლარი';
+        if (_invoiceTypeSelection == 'Monthly') {
+          _invoiceType = "თვე";
+          _invoiceType2 = "ყოველთვიური";
+        } else {
+          _invoiceType = "ღამე";
+          _invoiceType2 = "ღამის";
+        }
+
+        final prefilledGuide = data['guidePerson'] as String?;
+        if (prefilledGuide != null && _guidePersonOptions.containsKey(prefilledGuide)) {
+          _guidePerson = prefilledGuide;
+          _guidePhoneNum = _guidePersonOptions[prefilledGuide]!;
+        }
+
+        if (_selectedApartment != null) {
+          _onApartmentSelected(_selectedApartment);
+          final bookingPrice = data['bookingPrice'] as double?;
+          if (bookingPrice != null) {
+            _priceController.text = _formatDouble(bookingPrice);
+          }
+        }
+
+        if (_startDate != null && _endDate != null) {
+          _calculateDatesRange();
+        }
       }
+    } else {
+      // Set default address prefixes if no prefilled data
+      _geAddressController.text = 'ქ. ბათუმი, ';
+      _ruAddressController.text = 'г. Батуми, ';
     }
 
     _districtController.addListener(_updateCalculatedPrices);
@@ -409,15 +526,37 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
     _prePayedController.addListener(_updateCalculatedPrices);
     _manualOwnerNameController.addListener(_updateOwnerBlock);
 
-    // Load all owners
-    _firestoreService.getOwners().listen((owners) {
+
+
+    _ownersSubscription = _firestoreService.getOwners().listen((owners) { // Capture subscription
+      if (!mounted) return; // Add safety check
       setState(() {
         _allOwners = owners;
+
+        if (_selectedApartment != null && (_selectedOwner == null || _selectedOwner!.name == 'Unknown')) {
+          final String ownerIdentifier = _selectedApartment!.ownerNumber.isNotEmpty
+              ? '${_selectedApartment!.ownerName}-${_selectedApartment!.ownerNumber}'
+              : _selectedApartment!.ownerName;
+
+          final foundOwner = _allOwners.firstWhere(
+                (owner) => owner.id == ownerIdentifier,
+            orElse: () => Owner(id: '', name: 'Unknown', ownerNumber: ''),
+          );
+
+          _selectedOwner = foundOwner;
+
+          // Also update the manual owner text fields if visible.
+          if (_addOwnerManually == 'კი') {
+            _manualOwnerNameController.text = _selectedOwner?.name ?? '';
+            _manualOwnerNameRuController.text = _selectedOwner?.nameRu ?? ''; // ADD THIS LINE
+          }
+        }
       });
     });
 
     // Load all apartments initially
-    _firestoreService.getAllApartments().listen((apartments) {
+    _apartmentsSubscription = _firestoreService.getAllApartments().listen((apartments) { // Capture subscription
+      if (!mounted) return; // Add safety check
       setState(() {
         _allApartments = apartments;
         _filterAndSortApartments();
@@ -438,10 +577,14 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
     setupFocusListeners(_geMicroDistrictFocusNode, _ruMicroDistrictFocusNode, (isRuDominant) => _isRuMicroDistrictDominant = isRuDominant);
     setupFocusListeners(_geNameTakeFocusNode, _ruNameTakeFocusNode, (isRuDominant) => _isRuNameTakeDominant = isRuDominant);
 
+    setupFocusListeners(_geOwnerNameFocusNode, _ruOwnerNameFocusNode, (isRuDominant) => _isRuOwnerNameDominant = isRuDominant);
+// ... existing code
   }
 
   @override
   void dispose() {
+    _ownersSubscription?.cancel();
+    _apartmentsSubscription?.cancel();
     _geAddressController.dispose();
     _ruAddressController.dispose();
     _priceController.dispose();
@@ -464,6 +607,10 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
     _ruMicroDistrictFocusNode.dispose();
     _geNameTakeFocusNode.dispose();
     _ruNameTakeFocusNode.dispose();
+
+    // ADD THESE TWO LINES
+    _geOwnerNameFocusNode.dispose();
+    _ruOwnerNameFocusNode.dispose();
     super.dispose();
   }
 
@@ -532,13 +679,19 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
     _ruAddressController.text = ruPrefixToAdd + cleanRuAddress;
   }
 
+// lib/invoice_generator_screen.dart -> _InvoiceGeneratorScreenState
+
   void _onApartmentSelected(Apartment? apartment) {
     setState(() {
       _selectedApartment = apartment;
 
       if (apartment != null) {
+        // This part is now fixed from the previous step
+        final String ownerIdentifier = apartment.ownerNumber.isNotEmpty
+            ? '${apartment.ownerName}-${apartment.ownerNumber}'
+            : apartment.ownerName;
         _selectedOwner = _allOwners.firstWhere(
-              (owner) => owner.id == apartment.ownerId,
+              (owner) => owner.id == ownerIdentifier,
           orElse: () => Owner(id: '', name: 'Unknown', ownerNumber: ''),
         );
 
@@ -564,18 +717,22 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
         _districtController.text = apartment.district;
         _microDistrictController.text = apartment.microDistrict;
 
-        // If manual owner mode is on, set the name
+        // If manual owner mode is on, set both Georgian and Russian names
         if (_addOwnerManually == 'კი') {
           _manualOwnerNameController.text = _selectedOwner?.name ?? '';
+          _manualOwnerNameRuController.text = _selectedOwner?.nameRu ?? ''; // ADD THIS LINE
         }
+
+        _priceController.text = _invoiceTypeSelection == 'Daily'
+            ? _formatDouble(apartment.dailyPrice)
+            : _formatDouble(apartment.monthlyPrice);
+
       } else {
+        // This 'else' block remains the same
         _selectedCity = 'ბათუმი';
-        // Clear all apartment-related fields
         _geAddressController.clear();
         _ruAddressController.clear();
         _priceController.clear();
-
-        // Reset dropdowns to defaults
         _seaLine = 'პირველი ზოლი';
         _seaView = "არა";
         _geAppRoom = '3-ოთახიანი';
@@ -594,28 +751,23 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
       _selectedApartment = null; // Clear selected apartment when owner changes
 
       if (owner != null) {
-        // Filter apartments for this owner
         _availableApartmentsForOwner = _allApartments
             .where((apartment) => apartment.ownerId == owner.id)
             .toList();
-
         _filterAndSortApartments();
-
-        // Auto-select first apartment if available
         if (_availableApartmentsForOwner.isNotEmpty) {
           _onApartmentSelected(_availableApartmentsForOwner.first);
         }
 
-        // If manual owner mode is on, set the name
+        // If manual owner mode is on, set both names
         if (_addOwnerManually == 'კი') {
           _manualOwnerNameController.text = owner.name;
+          _manualOwnerNameRuController.text = owner.nameRu; // ADD THIS LINE
         }
       } else {
-        // Show all apartments when no owner is selected
+        // This 'else' block handles deselecting an owner
         _availableApartmentsForOwner = List.from(_allApartments);
         _filterAndSortApartments();
-
-        // Clear all fields
         _geAddressController.clear();
         _ruAddressController.clear();
         _priceController.clear();
@@ -626,8 +778,7 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
         _childrenController.clear();
         _takePhoneNumController.clear();
         _manualOwnerNameController.clear();
-
-        // Reset dropdowns to defaults
+        _manualOwnerNameRuController.clear(); // ADD THIS LINE
         _seaLine = 'პირველი ზოლი';
         _seaView = "არა";
         _geAppRoom = '3-ოთახიანი';
@@ -642,14 +793,19 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
         _guidePhoneNum = '+995 599 238 685';
         _pets = 'არა';
         _addOwnerManually = 'არა';
-
-        // Reset calculated values
         _priceFull = 0.0;
         _priceLeft = 0.0;
         _calculateDateNumbers = '';
         _calculatedPeriod = 0;
       }
     });
+  }
+
+  String _formatDouble(double value) {
+    if (value.remainder(1) == 0) {
+      return value.toInt().toString();
+    }
+    return value.toStringAsFixed(2);
   }
 
   void _updateOwnerBlock() {
@@ -810,11 +966,24 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
   }
 
   String get _guidePersonGe {
+    if (_guidePerson == 'სხვა') {
+      return _customGuideNameController.text;
+    }
     return _guidePerson;
   }
 
   String get _guidePersonRu {
+    if (_guidePerson == 'სხვა') {
+      return ''; // No direct Russian equivalent for custom input
+    }
     return _guidePersonRuNames[_guidePerson] ?? '';
+  }
+
+  String get _guidePhoneNumFormatted {
+    if (_guidePerson == 'სხვა') {
+      return _customGuidePhoneController.text;
+    }
+    return _guidePhoneNum;
   }
 
   String get _takePhoneNum {
@@ -1008,9 +1177,19 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
 
     // Handle owner block based on recipient and manual input
     if (_invoiceRecipient == 'მეპატრონე') {
-      if (_addOwnerManually == 'კი' && _manualOwnerNameController.text.isNotEmpty) {
-        geOwnerBlock = '\n👤 მეპატრონე:\n${_manualOwnerNameController.text}';
-        ruOwnerBlock = '\n👤 Владелец:\n${_manualOwnerNameController.text}';
+      if (_addOwnerManually == 'კი') {
+        final geName = _manualOwnerNameController.text;
+        final ruName = _manualOwnerNameRuController.text;
+
+        if (geName.isNotEmpty) {
+          geOwnerBlock = '\n👤 მეპატრონე:\n$geName';
+        }
+        // Use Russian name if provided, otherwise fallback to Georgian name
+        if (ruName.isNotEmpty) {
+          ruOwnerBlock = '\n👤 Владелец:\n$ruName';
+        } else if (geName.isNotEmpty) {
+          ruOwnerBlock = '\n👤 Владелец:\n$geName';
+        }
       } else if (_selectedOwner != null) {
         geOwnerBlock = '\n👤 მეპატრონე:\n${_selectedOwner!.name} - ${_selectedOwner!.ownerNumber}';
         ruOwnerBlock = '\n👤 Владелец:\n${_selectedOwner!.name} - ${_selectedOwner!.ownerNumber}';
@@ -1035,9 +1214,19 @@ class _InvoiceGeneratorScreenState extends State<InvoiceGeneratorScreen> {
     }
 
     // Handle guide block
-    if (_guidePerson == 'არავინ') {
-      geGuideBlockContent = '';
-      ruGuideBlockContent = '';
+    if (_guidePerson == 'სხვა') {
+      final customName = _customGuideNameController.text;
+      final customPhone = _customGuidePhoneController.text;
+      geGuideBlockContent = """
+    
+📞 თქვენ დაგხვდებათ:
+$customName – $customPhone
+""";
+      ruGuideBlockContent = """
+    
+📞 Вас встретит:
+$customName – $customPhone
+""";
     } else {
       geGuideBlockContent = """
     
@@ -1123,7 +1312,7 @@ ${_guidePersonRu} – ${_guidePhoneNum}
     generatedText = generatedText.replaceAll('\${priceLeftFormatted}', _priceLeftFormatted);
     generatedText = generatedText.replaceAll('\${guidePersonGe}', _guidePersonGe);
     generatedText = generatedText.replaceAll('\${guidePersonRu}', _guidePersonRu);
-    generatedText = generatedText.replaceAll('\${guidePhoneNum}', _guidePhoneNum);
+    generatedText = generatedText.replaceAll('\${guidePhoneNum}', _guidePhoneNumFormatted);
     generatedText = generatedText.replaceAll('\${adultsFormattedGe}', _adultsFormattedGe);
     generatedText = generatedText.replaceAll('\${adultsFormattedRu}', _adultsFormattedRu);
     generatedText = generatedText.replaceAll('\${childrenFormattedGe}', _childrenFormattedGe);
@@ -1259,136 +1448,6 @@ ${_guidePersonRu} – ${_guidePhoneNum}
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  const SizedBox(height: 24),
-
-                  // Section headers with modern styling
-                  _buildSectionHeader('აირჩიეთ მეპატრონე და ბინა:'),
-                  const SizedBox(height: 12),
-
-                  // Owner dropdown
-                  DropdownSearch<Owner?>(
-                    selectedItem: _selectedOwner,
-                    itemAsString: (Owner? owner) => owner != null
-                        ? '${owner.name} - ${owner.ownerNumber}'
-                        : 'None',
-                    asyncItems: (String filter) async {
-                      // This function will be called to filter items
-                      // You might want to optimize this by searching directly in Firestore
-                      // if _allOwners is very large, but for typical use, filtering in-memory is fine.
-                      return _allOwners
-                          .where((owner) =>
-                      owner.name
-                          .toLowerCase()
-                          .contains(filter.toLowerCase()) ||
-                          owner.ownerNumber
-                              .toLowerCase()
-                              .contains(filter.toLowerCase()))
-                          .toList();
-                    },
-                    onChanged: _onOwnerSelected,
-                    dropdownDecoratorProps: DropDownDecoratorProps(
-                      dropdownSearchDecoration: InputDecoration(
-                        labelText: 'მეპატრონე',
-                        labelStyle: inputLabelStyle,
-                        border: OutlineInputBorder(
-                          borderSide: BorderSide(color: Colors.grey.shade300),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderSide: BorderSide(color: Colors.grey.shade300),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderSide: const BorderSide(
-                              color: Color(0xFF004aad), width: 1.5),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 12),
-                        filled: true,
-                        fillColor: Colors.grey.shade50,
-                      ),
-                    ),
-                    popupProps: const PopupProps.menu(
-                      showSearchBox: true,
-                      menuProps: MenuProps(
-                        borderRadius: BorderRadius.all(Radius.circular(8)),
-                      ),
-                      searchFieldProps: TextFieldProps(
-                        decoration: InputDecoration(
-                          hintText: 'მეპატრონის ძიება',
-                          border: OutlineInputBorder(),
-                          contentPadding:
-                          EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Apartment dropdown
-                  DropdownSearch<Apartment?>(
-                    selectedItem: _selectedApartment,
-                    itemAsString: (Apartment? apartment) => apartment != null
-                        ? '${apartment.geAddress} (${_allOwners.firstWhere((owner) => owner.id == apartment.ownerId, orElse: () => Owner(id: '', name: 'Unknown', ownerNumber: '')).name})'
-                        : 'არცერთი',
-                    asyncItems: (String filter) async {
-                      // Filter based on both Georgian address and owner name
-                      return _availableApartmentsForOwner.where((apartment) {
-                        final ownerName = _allOwners
-                            .firstWhere(
-                              (owner) => owner.id == apartment.ownerId,
-                          orElse: () =>
-                              Owner(id: '', name: 'უცნობი', ownerNumber: ''),
-                        )
-                            .name;
-                        return apartment.geAddress
-                            .toLowerCase()
-                            .contains(filter.toLowerCase()) ||
-                            ownerName
-                                .toLowerCase()
-                                .contains(filter.toLowerCase());
-                      }).toList();
-                    },
-                    onChanged: _onApartmentSelected,
-                    dropdownDecoratorProps: DropDownDecoratorProps(
-                      dropdownSearchDecoration: InputDecoration(
-                        labelText: 'ბინა',
-                        labelStyle: inputLabelStyle,
-                        border: OutlineInputBorder(
-                          borderSide: BorderSide(color: Colors.grey.shade300),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderSide: BorderSide(color: Colors.grey.shade300),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderSide: const BorderSide(
-                              color: Color(0xFF004aad), width: 1.5),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 12),
-                        filled: true,
-                        fillColor: Colors.grey.shade50,
-                      ),
-                    ),
-                    popupProps: const PopupProps.menu(
-                      showSearchBox: true,
-                      menuProps: MenuProps(
-                        borderRadius: BorderRadius.all(Radius.circular(8)),
-                      ),
-                      searchFieldProps: TextFieldProps(
-                        decoration: InputDecoration(
-                          hintText: 'ბინის ძიება',
-                          border: OutlineInputBorder(),
-                          contentPadding:
-                          EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                        ),
-                      ),
-                    ),
-                  ),
                   const SizedBox(height: 24),
 
                   // Invoice type section
@@ -1778,14 +1837,14 @@ ${_guidePersonRu} – ${_guidePhoneNum}
                   _buildPriceInfoCard(
                     label: 'ჯამური ღირებულება',
                     value:
-                    '${_priceFull.toStringAsFixed(2)} $_sellingCurrency',
+                    '${_formatDouble(_priceFull)} $_sellingCurrency',
                   ),
                   const SizedBox(height: 8),
                   if (_showClientFields)
                     _buildPriceInfoCard(
                       label: 'დარჩ. გადასახდელი',
                       value:
-                      '${_priceLeft.toStringAsFixed(2)} $_sellingCurrency',
+                      '${_formatDouble(_priceLeft)} $_sellingCurrency',
                     ),
                   const SizedBox(height: 24),
 
@@ -1835,11 +1894,11 @@ ${_guidePersonRu} – ${_guidePhoneNum}
                       const SizedBox(width: 12),
                       Expanded(
                         child: _buildTypeToggle(
-                          label: 'არავინ',
-                          isActive: _guidePerson == 'არავინ',
+                          label: 'სხვა',
+                          isActive: _guidePerson == 'სხვა',
                           onTap: () {
                             setState(() {
-                              _guidePerson = 'არავინ';
+                              _guidePerson = 'სხვა';
                               _guidePhoneNum = '';
                             });
                           },
@@ -1847,13 +1906,34 @@ ${_guidePersonRu} – ${_guidePhoneNum}
                       ),
                     ],
                   ),
+                  if (_guidePerson == 'სხვა') ...[
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildModernTextField(
+                            controller: _customGuideNameController,
+                            label: 'სახელი ვინ დახვდება',
+                            keyboardType: TextInputType.text,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _buildModernTextField(
+                            controller: _customGuidePhoneController,
+                            label: 'ტელეფონის ნომერი ვინ დახვდება',
+                            keyboardType: TextInputType.phone,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 24),
 
                   // Guest information
                   _buildSectionHeader('სტუმრის ინფორმაცია:'),
                   if (_showClientFields) ...[
-                    const SizedBox(height: 8),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 12),
                     _buildAnimatedTextFieldRow(
                       geController: _geNameTakeController,
                       ruController: _ruNameTakeController,
@@ -1946,6 +2026,8 @@ ${_guidePersonRu} – ${_guidePhoneNum}
                                     _selectedOwner != null) {
                                   _manualOwnerNameController.text =
                                       _selectedOwner!.name;
+                                  _manualOwnerNameRuController.text =
+                                      _selectedOwner!.nameRu;
                                 }
                               });
                             },
@@ -1955,9 +2037,14 @@ ${_guidePersonRu} – ${_guidePhoneNum}
                     ),
                     if (_addOwnerManually == 'კი') ...[
                       const SizedBox(height: 16),
-                      _buildModernTextField(
-                        controller: _manualOwnerNameController,
-                        label: 'მეპატრონის სახელი',
+                      _buildAnimatedTextFieldRow(
+                        geController: _manualOwnerNameController,
+                        ruController: _manualOwnerNameRuController,
+                        geLabel: 'სახელი (ქართულად)',
+                        ruLabel: '(რუს./ინგ.)',
+                        geFocusNode: _geOwnerNameFocusNode,
+                        ruFocusNode: _ruOwnerNameFocusNode,
+                        isRuDominant: _isRuOwnerNameDominant,
                       ),
                     ],
                     const SizedBox(height: 24),
@@ -2045,7 +2132,7 @@ ${_guidePersonRu} – ${_guidePhoneNum}
                               'Price Left': _priceLeft.toStringAsFixed(2),
                               'Selling Currency': _sellingCurrency,
                               'Guide Person (GE)': _guidePerson,
-                              'Guide Phone Num': _guidePhoneNum,
+                              'Guide Phone Num': _guidePhoneNumFormatted,
                               'Guest Name (GE)': _geNameTakeController.text,
                               'Guest Name (RU)': _ruNameTakeController.text,
                               'Guest Phone Num':
@@ -2059,6 +2146,7 @@ ${_guidePersonRu} – ${_guidePhoneNum}
                               _addOwnerManually,
                               'Manual Owner Name':
                               _manualOwnerNameController.text,
+                              'Manual Owner Name (RU)': _manualOwnerNameRuController.text,
                             };
 
                             final historyItem = DocumentHistoryItem(
@@ -2152,7 +2240,7 @@ ${_guidePersonRu} – ${_guidePhoneNum}
                               'Price Left': _priceLeft.toStringAsFixed(2),
                               'Selling Currency': _sellingCurrency,
                               'Guide Person (GE)': _guidePerson,
-                              'Guide Phone Num': _guidePhoneNum,
+                              'Guide Phone Num': _guidePhoneNumFormatted,
                               'Guest Name (GE)': _geNameTakeController.text,
                               'Guest Name (RU)': _ruNameTakeController.text,
                               'Guest Phone Num':
@@ -2166,6 +2254,7 @@ ${_guidePersonRu} – ${_guidePhoneNum}
                               _addOwnerManually,
                               'Manual Owner Name':
                               _manualOwnerNameController.text,
+                              'Manual Owner Name (RU)': _manualOwnerNameRuController.text,
                             };
 
                             final historyItem = DocumentHistoryItem(
